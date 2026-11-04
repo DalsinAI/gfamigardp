@@ -11,7 +11,9 @@
 #             GFOPENSDK=, GFOPENTLS=, OLUI= and OGT_GUEST=
 # Outputs: GFAmigaRDP (the client: "GFAmigaRDP DEMO" and "GFAmigaRDP DEMO
 # SESSION" need no server), tools/RDPProbe, tests/X224Test, Themes/*.theme,
-# Env/GFOpenGadTools/Look, README-lab.txt; lib/libolui.a for reference.
+# Env/GFOpenGadTools/Look, README-lab.txt, Libs/gfopentls.library and
+# Libs/gfopencrypto.library (from the pinned gfopentls; LIBS=0 skips them),
+# tools/GFOpenTLSClient; lib/libolui.a for reference.
 # MIT, Copyright (c) 2026 AmiCradle Team.
 set -eu
 
@@ -94,10 +96,26 @@ cp "$OGT_ROOT"/themes/*.theme "$OUT/Themes/"
 printf 'Open\n' > "$OUT/Env/GFOpenGadTools/Look"
 cp "$HERE/docs/LAB.txt" "$OUT/README-lab.txt"
 
+# the libraries GFAmigaRDP opens at run time, built by the pinned gfopentls's
+# own scripts (unchanged) with this stove: gfopencrypto.library (which
+# gfopentls.library opens) and gfopentls.library, for SYS:Libs/.
+# LIBS=0 leaves them out.
+if [ "${LIBS:-1}" != 0 ]; then
+    mkdir -p "$OUT/Libs"
+    for s in build-amiga.sh build-amiga-tls.sh; do
+        echo "building the libraries: gfopentls/$s"
+        STOVE="$STOVE" CC="$CC" CPU="${CPU:-040}" OUT="$WORK/libs" sh "$GFOPENTLS/$s" > "$WORK/libs-$s.log" 2>&1 ||
+            { tail -20 "$WORK/libs-$s.log"; exit 1; }
+    done
+    cp "$WORK/libs/lib/gfopencrypto.library" "$WORK/libs/lib/gfopentls.library" "$OUT/Libs/"
+    cp "$WORK/libs/tests/GFOpenTLSClient" "$OUT/tools/"
+    printf '%s\n' "$(cat "$GFOPENTLS/.pin" 2>/dev/null)" > "$OUT/Libs/GFOPENTLS-PIN"
+fi
+
 W=$(grep -c "warning:" "$LOG" || true)
 for f in GFAmigaRDP tools/RDPProbe tests/X224Test; do
     echo "$OUT/$f ($(wc -c < "$OUT/$f") bytes)"
 done
 echo "themes: $(ls "$OUT/Themes" 2>/dev/null | tr '\n' ' ')"
 echo "warnings: $W (warnings.log)"
-(cd "$OUT" && sha256sum GFAmigaRDP tools/RDPProbe tests/X224Test > SHA256SUMS && cat SHA256SUMS)
+(cd "$OUT" && sha256sum GFAmigaRDP tools/RDPProbe tests/X224Test $(ls Libs/*.library 2>/dev/null) > SHA256SUMS && cat SHA256SUMS)

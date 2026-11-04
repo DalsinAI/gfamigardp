@@ -23,10 +23,10 @@
 #include <string.h>
 
 /* cybergraphics.library by its vectors (interface facts from its
- * autodoc): WritePixelArray -30, GetCyberMapAttr -96 */
+ * autodoc): WritePixelArray -126, GetCyberMapAttr -96 */
 static struct Library* CyberGfxBase;
 #define CGX_WPA(src, sx, sy, mod, rp, dx, dy, w, h, fmt) \
-	LP10(0x1e, ULONG, WritePixelArray, APTR, (src), a0, UWORD, (sx), d0, UWORD, (sy), d1, UWORD, (mod), d2, \
+	LP10(0x7e, ULONG, WritePixelArray, APTR, (src), a0, UWORD, (sx), d0, UWORD, (sy), d1, UWORD, (mod), d2, \
 	     struct RastPort*, (rp), a1, UWORD, (dx), d3, UWORD, (dy), d4, UWORD, (w), d5, UWORD, (h), d6, \
 	     UBYTE, (fmt), d7, , CyberGfxBase)
 #define CGX_MAPATTR(bm, a) LP2(0x60, ULONG, GetCyberMapAttr, struct BitMap*, (bm), a0, ULONG, (a), d0, , CyberGfxBase)
@@ -54,7 +54,11 @@ static void get_pens(struct Screen* scr)
 	for (r = 0; r < 3; r++)
 		for (g = 0; g < 3; g++)
 			for (b = 0; b < 3; b++)
-				s_pens[s_npens++] = ObtainBestPen(s_cm, lv[r], lv[g], lv[b], OBP_Precision, PRECISION_IMAGE, TAG_DONE);
+			{
+				/* a shared screen may have no pen to spare: then the nearest it has */
+				LONG pen = ObtainBestPen(s_cm, lv[r], lv[g], lv[b], OBP_Precision, PRECISION_IMAGE, TAG_DONE);
+				s_pens[s_npens++] = pen >= 0 ? pen : -2 - FindColor(s_cm, lv[r], lv[g], lv[b], -1);
+			}
 	s_white = ObtainBestPen(s_cm, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, TAG_DONE);
 	s_black = ObtainBestPen(s_cm, 0, 0, 0, TAG_DONE);
 }
@@ -65,7 +69,7 @@ void desktop_free(void)
 	if (s_cm)
 	{
 		for (i = 0; i < s_npens; i++)
-			if (s_pens[i] >= 0) ReleasePen(s_cm, (ULONG)s_pens[i]);
+			if (s_pens[i] >= 0) ReleasePen(s_cm, (ULONG)s_pens[i]); /* -2 - n: FindColor's n, not obtained */
 		if (s_white >= 0) ReleasePen(s_cm, (ULONG)s_white);
 		if (s_black >= 0) ReleasePen(s_cm, (ULONG)s_black);
 	}
@@ -132,7 +136,7 @@ void desktop_draw(struct Window* win, int x0, int y0, int w, int h, const struct
 				ULONG c = ui_pattern(x, y, W, H);
 				int t = bayer[y & 3][x & 3];
 				int i = q3((c >> 16) & 255, t) * 9 + q3((c >> 8) & 255, t) * 3 + q3(c & 255, t);
-				row[x] = (UBYTE)(s_pens[i] >= 0 ? s_pens[i] : 0);
+				row[x] = (UBYTE)(s_pens[i] >= 0 ? s_pens[i] : -2 - s_pens[i]);
 			}
 			WriteChunkyPixels(rp, (UWORD)x0, (UWORD)(y0 + y), (UWORD)(x0 + dw - 1), (UWORD)(y0 + y), row, dw);
 		}

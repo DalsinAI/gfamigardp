@@ -158,8 +158,10 @@ int session_window(struct app* app, const struct session_info* info)
 		status(&s, info->demo ? "Demo session: no server. Amiga-D disconnects." :
 		                        "Connected and secured. The desktop itself is not drawn yet.");
 		/* both strips need library 11; the static libolui always has them */
-		ok = olui_amiga_layout(s.atb) && olui_amiga_strip(s.atb, 0, 0, 0, s.tb_h) &&
-		     olui_amiga_layout(s.asb) && olui_amiga_strip(s.asb, 0, -s.sb_h, 0, 0);
+		/* the strips first: olui_amiga_layout draws all it has, the whole window
+		 * when it has no strip yet (and the status bar's row went to the top) */
+		ok = olui_amiga_strip(s.atb, 0, 0, 0, s.tb_h) && olui_amiga_strip(s.asb, 0, -s.sb_h, 0, 0) &&
+		     olui_amiga_layout(s.atb) && olui_amiga_layout(s.asb);
 	}
 	if (ok)
 	{

@@ -36,7 +36,7 @@ struct session_info
 	char domain[64];
 	UWORD width, height;
 	UBYTE depth;
-	char security[96];   /* the negotiated protocol and the TLS cipher, in words */
+	char security[128];  /* the negotiated protocol, the TLS cipher and how far it got, in words */
 	int demo;            /* 1: no server, a test pattern */
 };
 

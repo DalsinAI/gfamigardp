@@ -10,6 +10,7 @@
 #include "amipr.h"
 #include "connect.h"
 #include "nla.h"
+#include "mcs.h"
 #include "x509.h"
 
 #include <exec/types.h>
@@ -274,10 +275,35 @@ static int probe(struct cw* c, struct session_info* info, ULONG protocols, const
 			return 0;
 		}
 	}
-	snprintf(info->security, sizeof(info->security), "%s, %s %s",
-	         cc.selected == RDP_PROTOCOL_SSL ? "TLS" : "NLA",
-	         amipr_tls_protocol(t.tls) == 0x0304 ? "TLS 1.3" : "TLS 1.2",
-	         amipr_tls_cipher(t.tls) ? amipr_tls_cipher(t.tls) : "");
+	/* MCS, GCC, the channels and the Client Info PDU, as far as licensing */
+	{
+		struct rdp_mcs_result mr;
+		s.width = info->width;
+		s.height = info->height;
+		s.depth = (uint8_t)info->depth;
+		set_status(c, "Joining the session's channels...");
+		olui_amiga_draw(c->a);
+		rc = rdp_mcs_connect(&t, &s, cc.selected, password, &mr);
+		if (rc != 0)
+		{
+			if (mr.disconnect_reason)
+				snprintf(line, sizeof(line), "The computer ended the connection after %s (reason %u).",
+				         rdp_mcs_stage_name(mr.stage), mr.disconnect_reason - 1);
+			else if (mr.error_info)
+				snprintf(line, sizeof(line), "The computer ended the connection after %s (error 0x%08lX).",
+				         rdp_mcs_stage_name(mr.stage), (unsigned long)mr.error_info);
+			else
+				snprintf(line, sizeof(line), "Stopped after %s: %s", rdp_mcs_stage_name(mr.stage), rdp_error_text(rc));
+			set_status(c, line);
+			rdp_transport_close(&t);
+			return 0;
+		}
+		snprintf(info->security, sizeof(info->security), "%s, %s %s; reached licensing: %s",
+		         cc.selected == RDP_PROTOCOL_SSL ? "TLS" : "NLA",
+		         amipr_tls_protocol(t.tls) == 0x0304 ? "TLS 1.3" : "TLS 1.2",
+		         amipr_tls_cipher(t.tls) ? amipr_tls_cipher(t.tls) : "",
+		         mr.lic_type == 0xFF ? rdp_license_error_text(mr.lic_error) : "licence exchange");
+	}
 	rdp_transport_close(&t);
 	return 1;
 }

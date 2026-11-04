@@ -12,6 +12,7 @@
 #include "amipr.h"
 #include "x509.h"
 #include "nla.h"
+#include "mcs.h"
 
 #include <dos/dos.h>
 #include <proto/exec.h>
@@ -55,6 +56,55 @@ static const char* stage_name(int stage)
 		case 3: return "the credentials";
 		default: return "the start";
 	}
+}
+
+static void print_mcs(int rc, const struct rdp_mcs_result* m)
+{
+	int i;
+	if (m->stage >= RDP_MCS_ST_CONNECTED)
+	{
+		printf("MCS: connected. Server RDP version 0x%08lX, encryption method %lu level %lu, I/O channel %u",
+		       (unsigned long)m->server_version, (unsigned long)m->enc_method, (unsigned long)m->enc_level,
+		       (unsigned)m->io_channel);
+		if (m->msg_channel)
+			printf(", message channel %u", (unsigned)m->msg_channel);
+		for (i = 0; i < m->channel_count; i++)
+			printf("%s%u", i ? " " : ", static channels ", (unsigned)m->channels[i]);
+		printf(".\n");
+	}
+	if (m->stage >= RDP_MCS_ST_ATTACHED)
+		printf("MCS: Erect Domain sent; Attach User confirmed, user channel %u.\n", (unsigned)m->user_channel);
+	if (m->stage >= RDP_MCS_ST_JOINED)
+		printf("MCS: every channel joined.\n");
+	if (m->stage >= RDP_MCS_ST_INFO_SENT)
+		printf("Client Info PDU sent (no Security Exchange: TLS carries it).\n");
+	if (m->stage >= RDP_MCS_ST_LICENSING)
+	{
+		printf("Licensing: security flags 0x%04X, bMsgType 0x%02X, flags 0x%02X, wMsgSize %u",
+		       (unsigned)m->sec_flags, (unsigned)m->lic_type, (unsigned)m->lic_flags, (unsigned)m->lic_size);
+		if (m->lic_type == 0xFF)
+			printf(": dwErrorCode 0x%08lX %s, dwStateTransition %lu", (unsigned long)m->lic_error,
+			       rdp_license_error_text(m->lic_error), (unsigned long)m->lic_state);
+		printf(".\n");
+		if (m->lic_type == 0xFF && m->lic_error == 7)
+			printf("Reached licensing: the server says the client's licence is valid; next comes Demand Active.\n");
+		else if (m->lic_type != 0xFF)
+			printf("Reached licensing: the server starts a licence exchange ([MS-RDPELE]); stopping here.\n");
+		return;
+	}
+	if (m->connect_result)
+		printf("MCS: the server refused the Connect Initial: result %u.\n", m->connect_result);
+	else if (m->attach_result)
+		printf("MCS: Attach User refused: result %u.\n", m->attach_result);
+	else if (m->join_result)
+		printf("MCS: Channel Join of %u refused: result %u.\n", (unsigned)m->join_failed, m->join_result);
+	if (m->disconnect_reason)
+		printf("MCS: Disconnect Provider Ultimatum, reason %u.\n", m->disconnect_reason - 1);
+	if (m->error_info)
+		printf("Set Error Info: 0x%08lX.\n", (unsigned long)m->error_info);
+	if (m->stage == RDP_MCS_ST_CONNECTED && m->enc_level)
+		printf("MCS: the server wants standard RDP encryption inside TLS; not supported.\n");
+	printf("Stopped after %s: %s\n", rdp_mcs_stage_name(m->stage), rc ? rdp_error_text(rc) : "?");
 }
 
 static void print_nla(int rc, const struct rdp_nla_result* r)
@@ -188,6 +238,12 @@ int main(void)
 							rc = rdp_nla(&t, &s, (const char*)args[A_PASSWORD], x.pubkey, x.pubkey_len,
 							             (cc.selected & RDP_PROTOCOL_HYBRID_EX) != 0, &nr);
 							print_nla(rc, &nr);
+							if (rc == 0)
+							{
+								struct rdp_mcs_result mr;
+								rc = rdp_mcs_connect(&t, &s, cc.selected, (const char*)args[A_PASSWORD], &mr);
+								print_mcs(rc, &mr);
+							}
 							if (rc != 0)
 								rc = 1;  /* said already */
 						}

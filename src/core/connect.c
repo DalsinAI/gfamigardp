@@ -3,6 +3,7 @@
  * MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #include "connect.h"
+#include "mcs.h"
 #include "amipr.h"
 
 #include <string.h>
@@ -50,6 +51,7 @@ const char* rdp_error_text(int rc)
 		case RDP_E_PROTO: return "The computer's answer was not RDP.";
 		case RDP_E_SPACE: return "The computer's answer was too long.";
 		case RDP_E_ARG: return "A setting is not valid.";
+		case RDP_E_MCS: return "The computer refused an MCS step.";
 		default: return "The connection failed.";
 	}
 }

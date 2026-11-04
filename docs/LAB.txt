@@ -1,0 +1,52 @@
+GFAmigaRDP 0.1 - on an AmiCradle lab machine
+=============================================
+
+What is here (copy the whole drawer, e.g. to Work:GFAmigaRDP/):
+
+  GFAmigaRDP           the client (68040, soft float: no FPU needed)
+  tools/RDPProbe       TCP + X.224 + TLS from the Shell, against a real computer
+  tests/X224Test       the X.224 encoder/decoder checks (prints "x224: ok")
+  Themes/*.theme       GFOpenGadTools themes: Open, Classic, Graphite, Glass, Clear, Sky, Ember
+  Env/GFOpenGadTools/Look   "Open": the theme to use
+  lib/libolui.a        the GFOpenLayout UI library, for reference only: it is
+                       linked into GFAmigaRDP and is not needed at run time
+  SHA256SUMS
+
+Needs
+  AmigaOS 3.2 (3.2.3 tested target), a 68040 or 68060.
+  ROM/LIBS: exec, dos, graphics, intuition, layers, gadtools.library,
+  keymap.library, diskfont.library (all part of 3.2); locale.library optional.
+  timer.device.
+  Fonts: the screen font (topaz.font 8 at least). Any font the theme names is
+  opened through diskfont.library; when it is missing the screen font is used.
+  NOT needed: gfopenlayout.library (the UI is linked in statically, library
+  version 11's strip and key calls included), opengadtools.library.
+  Optional: cybergraphics.library v40 (or P96's) for the true-colour desktop
+  through WritePixelArray; without it the desktop is dithered to pens with
+  WriteChunkyPixels.
+  For a real connection only: bsdsocket.library v4 (Roadshow or another
+  stack), gfopentls.library and gfopencrypto.library in LIBS:.
+
+Install the theme (once)
+  Copy Themes/#?.theme SYS:Prefs/Presets/Themes/
+  Copy Env/GFOpenGadTools ENVARC:GFOpenGadTools ALL
+  Copy Env/GFOpenGadTools ENV:GFOpenGadTools ALL
+  To try another look: SetEnv GFOpenGadTools/Look Classic  (then start again)
+
+Screenshots - no server needed
+  GFAmigaRDP DEMO
+      the connection window with sample favourites; Connect (the button,
+      Amiga-O, or C when no text field is active) opens the demo session;
+      Cancel or Esc quits. Underlined letters jump to their field or button.
+  GFAmigaRDP DEMO SESSION
+      straight to the session window: toolbar, test pattern desktop
+      (gradient, grid, grey ramp, colour bars), status bar.
+      Amiga-D goes back to the connection window, Amiga-Q quits.
+  GFAmigaRDP DEMO SESSION HOST=lab-pc USER=alice
+      the same, with that name in the toolbar.
+  Run them on a 16- or 24-bit RTG Workbench for the true-colour pattern, and
+  on an 8-colour AGA/ECS Workbench to see the dithered fallback.
+
+Real connection (connection initiation only in 0.1)
+  GFAmigaRDP                         the window; Connect probes the computer
+  tools/RDPProbe HOST=192.168.1.10   prints what the computer chose

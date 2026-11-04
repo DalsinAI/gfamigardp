@@ -108,6 +108,11 @@ done
 "$CC" $CFLAGS -s -o "$OUT/tools/RDPProbe" "$HERE/tests/rdpprobe.c" $OBJS $GNLIB -lamiga 2>>"$LOG"
 "$CC" $CFLAGS -s -o "$OUT/tests/X224Test" "$HERE/tests/x224_test.c" "$WORK/obj/x224.o" 2>>"$LOG"
 "$CC" $CFLAGS -s -o "$OUT/tests/NLAOffline" "$HERE/tests/nla_offline.c" $GNLIB -lamiga 2>>"$LOG"
+"$CC" $CFLAGS -s -o "$OUT/tests/NLAStages" "$HERE/tests/nla_stages.c" $GNLIB -lamiga 2>>"$LOG"
+# the same two with gfopenntlm linked in (libgfopenntlm.a), whatever NTLM= is
+STFLAGS=$(printf '%s' "$CFLAGS" | sed 's/ -DGFOPENNTLM_STATIC//')
+"$CC" $STFLAGS -DGFOPENNTLM_STATIC -s -o "$OUT/tests/NLAOfflineStatic" "$HERE/tests/nla_offline.c" "$GN/lib/libgfopenntlm.a" -lamiga 2>>"$LOG"
+"$CC" $STFLAGS -DGFOPENNTLM_STATIC -s -o "$OUT/tests/NLAStagesStatic" "$HERE/tests/nla_stages.c" "$GN/lib/libgfopenntlm.a" -lamiga 2>>"$LOG"
 cp "$LIBOLUI" "$OUT/lib/libolui.a"
 mkdir -p "$OUT/Libs"
 cp "$GN/lib/gfopenntlm.library" "$OUT/Libs/"
@@ -136,9 +141,9 @@ if [ "${LIBS:-1}" != 0 ]; then
 fi
 
 W=$(grep -c "warning:" "$LOG" || true)
-for f in GFAmigaRDP tools/RDPProbe tests/X224Test tests/NLAOffline Libs/gfopenntlm.library; do
+for f in GFAmigaRDP tools/RDPProbe tests/X224Test tests/NLAOffline tests/NLAOfflineStatic tests/NLAStages tests/NLAStagesStatic Libs/gfopenntlm.library; do
     echo "$OUT/$f ($(wc -c < "$OUT/$f") bytes)"
 done
 echo "themes: $(ls "$OUT/Themes" 2>/dev/null | tr '\n' ' ')"
 echo "warnings: $W (warnings.log)"
-(cd "$OUT" && sha256sum GFAmigaRDP tools/RDPProbe tests/X224Test tests/NLAOffline tests/GFOpenNTLM* $(ls Libs/*.library 2>/dev/null) > SHA256SUMS && cat SHA256SUMS)
+(cd "$OUT" && sha256sum GFAmigaRDP tools/RDPProbe tests/X224Test tests/NLAOffline tests/NLAOfflineStatic tests/NLAStages tests/NLAStagesStatic tests/GFOpenNTLM* $(ls Libs/*.library 2>/dev/null) > SHA256SUMS && cat SHA256SUMS)

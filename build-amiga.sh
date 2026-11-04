@@ -107,6 +107,7 @@ done
 "$CC" $CFLAGS -s -o "$OUT/GFAmigaRDP" $UIOBJS $OBJS "$LIBOLUI" $GNLIB -lamiga 2>>"$LOG"
 "$CC" $CFLAGS -s -o "$OUT/tools/RDPProbe" "$HERE/tests/rdpprobe.c" $OBJS $GNLIB -lamiga 2>>"$LOG"
 "$CC" $CFLAGS -s -o "$OUT/tests/X224Test" "$HERE/tests/x224_test.c" "$WORK/obj/x224.o" 2>>"$LOG"
+"$CC" $CFLAGS -s -o "$OUT/tests/NLAOffline" "$HERE/tests/nla_offline.c" $GNLIB -lamiga 2>>"$LOG"
 cp "$LIBOLUI" "$OUT/lib/libolui.a"
 mkdir -p "$OUT/Libs"
 cp "$GN/lib/gfopenntlm.library" "$OUT/Libs/"
@@ -135,9 +136,9 @@ if [ "${LIBS:-1}" != 0 ]; then
 fi
 
 W=$(grep -c "warning:" "$LOG" || true)
-for f in GFAmigaRDP tools/RDPProbe tests/X224Test Libs/gfopenntlm.library; do
+for f in GFAmigaRDP tools/RDPProbe tests/X224Test tests/NLAOffline Libs/gfopenntlm.library; do
     echo "$OUT/$f ($(wc -c < "$OUT/$f") bytes)"
 done
 echo "themes: $(ls "$OUT/Themes" 2>/dev/null | tr '\n' ' ')"
 echo "warnings: $W (warnings.log)"
-(cd "$OUT" && sha256sum GFAmigaRDP tools/RDPProbe tests/X224Test tests/GFOpenNTLM* $(ls Libs/*.library 2>/dev/null) > SHA256SUMS && cat SHA256SUMS)
+(cd "$OUT" && sha256sum GFAmigaRDP tools/RDPProbe tests/X224Test tests/NLAOffline tests/GFOpenNTLM* $(ls Libs/*.library 2>/dev/null) > SHA256SUMS && cat SHA256SUMS)

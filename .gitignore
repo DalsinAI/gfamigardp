@@ -1,3 +1,4 @@
 build-amiga/
 build-preview/
 *.o
+.build/

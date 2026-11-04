@@ -66,16 +66,20 @@ How POSIX ideas map onto the Amiga here:
 ## Build
 
 ```
-OPENNDK=.../gfopensdk/OpenNDK GFOPENTLS=.../gfopentls OLUI=.../gfopenlayout \
-OGT_ROOT=.../amicradle-guest/libraries/opengadtools ./build-amiga.sh
+./build-amiga.sh
 ```
 
-STOVE= picks the os32 GCC 16 stove (default ~/AmiCradle/stoves/os32-gcc16),
-OUT= the output drawer (default build-amiga), CPU=060 a 68060 build.
-libolui.a is built from OLUI when it is missing.
+tools/fetch_deps.sh fetches the Open SDK parts at pinned commits into
+.build/deps: gfopensdk (OpenNDK's headers, the soft-float specs),
+gfopentls (headers), gfopenlayout (libolui, built here with the same
+stove) and amicradle-guest (GFOpenGadTools' theme reader and themes).
+GFOPENSDK=, GFOPENTLS=, OLUI= and OGT_GUEST= use local checkouts instead.
+STOVE= picks the stove (default ~/AmiCradle/stoves/os32-gcc16), OUT= the
+output drawer (default build-amiga), CPU=060 a 68060 build.
 
 Output: `GFAmigaRDP`, `tools/RDPProbe`, `tests/X224Test`, `Themes/*.theme`,
-`Env/GFOpenGadTools/Look`, `README-lab.txt`, `lib/libolui.a`, `SHA256SUMS`.
+`Env/GFOpenGadTools/Look`, `README-lab.txt`, `lib/libolui.a`, `SHA256SUMS`,
+`warnings.log`.
 
 The X.224 test also runs on a PC: `cc -Isrc/core tests/x224_test.c src/core/x224.c && ./a.out`.
 

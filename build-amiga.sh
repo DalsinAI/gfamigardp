@@ -4,12 +4,11 @@
 #   STOVE     the stove (default ~/AmiCradle/stoves/os32-gcc16)
 #   CPU       040 (default: soft float, any 68040 or 68LC040) or 060
 #   OUT       the output directory (default build-amiga)
-#   OPENNDK   OpenNDK (default ../gfopensdk/OpenNDK); its Include_H is used
-#   SPECS     the soft-float specs (default $OPENNDK/../Lib/m68k-soft-m68040.specs)
-#   GFOPENTLS gfopentls, for <gfopentls/...> (default ../gfopentls)
-#   OLUI      gfopenlayout, for libolui.a (default ../gfopenlayout)
-#   OGT_ROOT  GFOpenGadTools (amicradle-guest libraries/opengadtools): its
-#             themes go into $OUT, and libolui.a is built with it if missing
+#   WORK      objects and the Open SDK parts (default .build, beside this)
+#   DEPS      where the Open SDK parts go (default $WORK/deps): gfopensdk,
+#             gfopentls, gfopenlayout and amicradle-guest at pinned commits,
+#             fetched by tools/fetch_deps.sh, or the checkouts named in
+#             GFOPENSDK=, GFOPENTLS=, OLUI= and OGT_GUEST=
 # Outputs: GFAmigaRDP (the client: "GFAmigaRDP DEMO" and "GFAmigaRDP DEMO
 # SESSION" need no server), tools/RDPProbe, tests/X224Test, Themes/*.theme,
 # Env/GFOpenGadTools/Look, README-lab.txt; lib/libolui.a for reference.
@@ -21,33 +20,41 @@ STOVE=${STOVE:-"$HOME/AmiCradle/stoves/os32-gcc16"}
 P="$STOVE/prefix"
 CC=${CC:-"$P/bin/m68k-amigaos-gcc"}
 OUT=${OUT:-"$HERE/build-amiga"}
-OPENNDK=${OPENNDK:-"$HERE/../gfopensdk/OpenNDK"}
-SPECS=${SPECS:-"$OPENNDK/../Lib/m68k-soft-m68040.specs"}
-GFOPENTLS=${GFOPENTLS:-"$HERE/../gfopentls"}
-OLUI=${OLUI:-"$HERE/../gfopenlayout"}
-OGT_ROOT=${OGT_ROOT:-}
+WORK=${WORK:-"$HERE/.build"}
+DEPS=${DEPS:-"$WORK/deps"}
+sh "$HERE/tools/fetch_deps.sh" "$DEPS"
+OPENNDK="$DEPS/gfopensdk/OpenNDK"
+SPECS="$DEPS/gfopensdk/Lib/m68k-soft-m68040.specs"
+GFOPENTLS="$DEPS/gfopentls"
+OLUI="$DEPS/gfopenlayout"
+OGT_ROOT="$DEPS/amicradle-guest/libraries/opengadtools"
 
-for d in "$OPENNDK/Include_H" "$GFOPENTLS/include" "$OLUI/include"; do
-    [ -d "$d" ] || { echo "build-amiga.sh: no $d (see the variables at the top)"; exit 2; }
+for d in "$OPENNDK/Include_H" "$GFOPENTLS/include" "$OLUI/include" "$OGT_ROOT/lib" "$OGT_ROOT/themes"; do
+    [ -d "$d" ] || { echo "build-amiga.sh: no $d"; exit 2; }
 done
+[ -f "$SPECS" ] || { echo "build-amiga.sh: no $SPECS"; exit 2; }
 [ -x "$CC" ] || { echo "build-amiga.sh: no compiler $CC (STOVE=)"; exit 2; }
+"$CC" --version | head -1
 case "${CPU:-040}" in
     040) CPUFLAGS="-m68040 -specs=$SPECS" ;;
     060) CPUFLAGS="-m68060" ;;
     *) echo "CPU is 040 or 060"; exit 2 ;;
 esac
 
-LIBOLUI="$OLUI/build-amiga/ui/libolui.a"
-if [ ! -f "$LIBOLUI" ]; then
-    [ -n "$OGT_ROOT" ] || { echo "build-amiga.sh: $LIBOLUI is missing: give OGT_ROOT= to build it"; exit 2; }
-    echo "building libolui.a in $OLUI"
-    OGT_ROOT="$OGT_ROOT" SPECS="$SPECS" STOVE="$STOVE" "$OLUI/build-ui-amiga.sh"
+# libolui.a built here from the pinned gfopenlayout, with this stove
+LIBOLUI="$WORK/olui/libolui.a"
+if [ ! -f "$LIBOLUI" ] || [ "$(cat "$WORK/olui/.pin" 2>/dev/null)" != "$(cat "$OLUI/.pin" 2>/dev/null)" ]; then
+    echo "building libolui.a"
+    OGT_ROOT="$OGT_ROOT" SPECS="$SPECS" STOVE="$STOVE" CC="$CC" AR="${AR:-${CC%gcc}ar}" OUT="$WORK/olui" sh "$OLUI/build-ui-amiga.sh"
+    cat "$OLUI/.pin" > "$WORK/olui/.pin" 2>/dev/null || :
 fi
 
 # OpenNDK's headers first, then the compiler's and libnix's own
 GCCINC=$("$CC" -print-file-name=include)
-INC="-nostdinc -isystem $GCCINC -isystem $OPENNDK/Include_H -isystem $P/m68k-amigaos/libnix/include \
-  -isystem $P/m68k-amigaos/sys-include -isystem $P/m68k-amigaos/include -isystem $P/include"
+INC="-nostdinc -isystem $GCCINC -isystem $OPENNDK/Include_H"
+for d in "$P/m68k-amigaos/libnix/include" "$P/m68k-amigaos/sys-include" "$P/m68k-amigaos/include" "$P/include"; do
+    [ -d "$d" ] && INC="$INC -isystem $d"
+done
 # -fno-delete-null-pointer-checks: address 0 is memory on an Amiga (GCC
 # would put a TRAP where it proves a pointer null);
 # -fno-late-combine-instructions: as libolui.a is built (GCC 16.2.0b)
@@ -56,36 +63,34 @@ CFLAGS="$CPUFLAGS $INC -D__AMIGA__ -DAMIGAOS3 -noixemul -std=gnu99 -O2 \
   -I$HERE/src/amiga -I$HERE/src/crypto -I$HERE/src/core -I$HERE/src/ui \
   -I$GFOPENTLS/include -I$OLUI/include"
 
-mkdir -p "$OUT/obj" "$OUT/tools" "$OUT/tests" "$OUT/lib" "$OUT/Themes" "$OUT/Env/GFOpenGadTools"
-LOG="$OUT/obj/warnings.log"
+mkdir -p "$WORK/obj" "$OUT/tools" "$OUT/tests" "$OUT/lib" "$OUT/Themes" "$OUT/Env/GFOpenGadTools"
+LOG="$OUT/warnings.log"
 : > "$LOG"
 
 OBJS=""
 for f in src/amiga/amipr_init.c src/amiga/amipr_time.c src/amiga/amipr_atomic.c src/amiga/amipr_wait.c \
          src/amiga/amipr_dos.c src/amiga/amipr_net.c src/amiga/amipr_crypto.c src/amiga/amipr_tls.c \
          src/crypto/x509.c src/core/x224.c src/core/transport.c src/core/connect.c; do
-    o="$OUT/obj/$(basename "$f" .c).o"
+    o="$WORK/obj/$(basename "$f" .c).o"
     "$CC" $CFLAGS -c "$HERE/$f" -o "$o" 2>>"$LOG"
     OBJS="$OBJS $o"
 done
 UIOBJS=""
 for f in src/ui/main.c src/ui/connect_win.c src/ui/session_win.c src/ui/desktop.c \
          src/ui/favourites.c src/ui/markup.c; do
-    o="$OUT/obj/ui_$(basename "$f" .c).o"
+    o="$WORK/obj/ui_$(basename "$f" .c).o"
     "$CC" $CFLAGS -c "$HERE/$f" -o "$o" 2>>"$LOG"
     UIOBJS="$UIOBJS $o"
 done
 
 "$CC" $CFLAGS -s -o "$OUT/GFAmigaRDP" $UIOBJS $OBJS "$LIBOLUI" -lamiga 2>>"$LOG"
 "$CC" $CFLAGS -s -o "$OUT/tools/RDPProbe" "$HERE/tests/rdpprobe.c" $OBJS -lamiga 2>>"$LOG"
-"$CC" $CFLAGS -s -o "$OUT/tests/X224Test" "$HERE/tests/x224_test.c" "$OUT/obj/x224.o" 2>>"$LOG"
+"$CC" $CFLAGS -s -o "$OUT/tests/X224Test" "$HERE/tests/x224_test.c" "$WORK/obj/x224.o" 2>>"$LOG"
 cp "$LIBOLUI" "$OUT/lib/libolui.a"
 
 # the GFOpenGadTools theme GFAmigaRDP's windows are drawn in: ENV:GFOpenGadTools/Look
 # names SYS:Prefs/Presets/Themes/<Look>.theme ("Open" when unset)
-if [ -n "$OGT_ROOT" ] && [ -d "$OGT_ROOT/themes" ]; then
-    cp "$OGT_ROOT"/themes/*.theme "$OUT/Themes/"
-fi
+cp "$OGT_ROOT"/themes/*.theme "$OUT/Themes/"
 printf 'Open\n' > "$OUT/Env/GFOpenGadTools/Look"
 cp "$HERE/docs/LAB.txt" "$OUT/README-lab.txt"
 
@@ -94,5 +99,5 @@ for f in GFAmigaRDP tools/RDPProbe tests/X224Test; do
     echo "$OUT/$f ($(wc -c < "$OUT/$f") bytes)"
 done
 echo "themes: $(ls "$OUT/Themes" 2>/dev/null | tr '\n' ' ')"
-echo "warnings: $W (obj/warnings.log)"
+echo "warnings: $W (warnings.log)"
 (cd "$OUT" && sha256sum GFAmigaRDP tools/RDPProbe tests/X224Test > SHA256SUMS && cat SHA256SUMS)

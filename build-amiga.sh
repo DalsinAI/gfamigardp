@@ -6,12 +6,12 @@
 #   OUT       the output directory (default build-amiga)
 #   WORK      objects and the Open SDK parts (default .build, beside this)
 #   DEPS      where the Open SDK parts go (default $WORK/deps): gfopensdk,
-#             gfopentls, gfopenlayout and amicradle-guest at pinned commits,
-#             fetched by tools/fetch_deps.sh, or the checkouts named in
-#             GFOPENSDK=, GFOPENTLS=, OLUI= and OGT_GUEST=
+#             gfopentls, gfopenlayout, amicradle-guest and gfopenntlm at
+#             pinned commits, fetched by tools/fetch_deps.sh, or the
+#             checkouts named in GFOPENSDK=, GFOPENTLS=, OLUI=, OGT_GUEST=
+#             and GFOPENNTLM=
 #   NTLM      shared (default: gfopenntlm.library, opened at run time) or
 #             static (libgfopenntlm.a linked in)
-#   GFOPENNTLM  the gfopenntlm checkout (default libs/gfopenntlm)
 # Outputs: GFAmigaRDP (the client: "GFAmigaRDP DEMO" and "GFAmigaRDP DEMO
 # SESSION" need no server), tools/RDPProbe, tests/X224Test, Themes/*.theme,
 # Env/GFOpenGadTools/Look, README-lab.txt, Libs/gfopentls.library and
@@ -55,9 +55,10 @@ if [ ! -f "$LIBOLUI" ] || [ "$(cat "$WORK/olui/.pin" 2>/dev/null)" != "$(cat "$O
     cat "$OLUI/.pin" > "$WORK/olui/.pin" 2>/dev/null || :
 fi
 
-# gfopenntlm (NTLM and CredSSP for NLA), built by its own script with this
+# gfopenntlm (NTLM and CredSSP for NLA, DalsinAI/gfopenntlm at its pin),
+# built by its own script with this
 # stove: the library, libgfopenntlm.a and the headers GFAmigaRDP uses
-GFOPENNTLM=${GFOPENNTLM:-"$HERE/libs/gfopenntlm"}
+GFOPENNTLM="$DEPS/gfopenntlm"
 GN="$WORK/gfopenntlm"
 echo "building gfopenntlm"
 STOVE="$STOVE" CC_AMIGA="$CC" AR_AMIGA="${AR:-${CC%gcc}ar}" CPU="${CPU:-040}" OUT="$GN" \

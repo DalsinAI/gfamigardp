@@ -1,11 +1,12 @@
 #!/bin/sh
 # The Open SDK parts GFAmigaRDP builds with, each at a pinned commit, into
 # DEPS/<name>: gfopensdk (OpenNDK's headers, the soft-float specs),
-# gfopentls (its library headers), gfopenlayout (libolui's source) and
-# amicradle-guest (GFOpenGadTools' theme reader and themes).
+# gfopentls (its library headers), gfopenlayout (libolui's source),
+# amicradle-guest (GFOpenGadTools' theme reader and themes) and gfopenntlm
+# (NTLMv2 and CredSSP for NLA, built from its source).
 #   tools/fetch_deps.sh DEPS
-# A checkout named in GFOPENSDK=, GFOPENTLS=, OLUI= or OGT_GUEST= (the
-# amicradle-guest top) is used as it is instead. A clean build machine
+# A checkout named in GFOPENSDK=, GFOPENTLS=, OLUI=, OGT_GUEST= (the
+# amicradle-guest top) or GFOPENNTLM= is used as it is instead. A clean build machine
 # (Cradle's stove_build) fetches them; when a fetch fails, a checkout
 # next to this one (../<name> or ../DalsinAI__<name>) is used, and named.
 # MIT, Copyright (c) 2026 AmiCradle Team.
@@ -18,7 +19,8 @@ mkdir -p "$DEPS"
 PINS='gfopensdk a7384f334c3eb64b30dd27cc5a6f480d72471f74
 gfopentls aa6f6a5a34a0558351ece25f29066f51a4e85499
 gfopenlayout da4a066ee2fe4a7ca93d4175c44f38a5b9ac80e6
-amicradle-guest 27832e77a4590810b40e57b3c182abb4e7fa366c'
+amicradle-guest 27832e77a4590810b40e57b3c182abb4e7fa366c
+gfopenntlm 5097e8bc0ed47b67ccfa4ed1e4f48566d02d49a0'
 
 fetch() {
     name=$1 pin=$2 dst="$DEPS/$1"
@@ -66,6 +68,7 @@ echo "$PINS" | while read -r name pin; do
         gfopentls) v=${GFOPENTLS:-} ;;
         gfopenlayout) v=${OLUI:-} ;;
         amicradle-guest) v=${OGT_GUEST:-} ;;
+        gfopenntlm) v=${GFOPENNTLM:-} ;;
     esac
     given "$name" "$v" || fetch "$name" "$pin"
 done

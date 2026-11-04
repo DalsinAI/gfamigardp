@@ -23,7 +23,8 @@ sources while doing so.
 
 ## gfopenntlm
 
-libs/gfopenntlm (gfopenntlm.library: NTLMv2 and CredSSP for NLA) follows the
+gfopenntlm (gfopenntlm.library: NTLMv2 and CredSSP for NLA; its own
+repository, DalsinAI/gfopenntlm, pinned in tools/fetch_deps.sh) follows the
 same rules: [MS-NLMP] for NTLM, [MS-CSSP] for CredSSP, [MS-ERREF] for the
 codes, and the RFCs above for MD4, MD5, HMAC, RC4 and SHA-256. Its tests
 use only the vectors printed in [MS-NLMP] 4.2 and in those RFCs; [MS-CSSP]

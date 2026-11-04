@@ -4,8 +4,8 @@ A Remote Desktop (RDP) client for AmigaOS 3.2 on the 68040, written from
 scratch by **Team 6 (Sacredtrees)**. It is based on **The Open SDK by the
 AmiCradle Team**: GFOpenLayout's UI themed by GFOpenGadTools, GFOpenTLS for
 TLS, GFOpenCrypto for the hashes and ciphers, and OpenNDK's headers. NLA's
-NTLMv2 and CredSSP are gfopenntlm.library (libs/gfopenntlm), written for it
-the same way.
+NTLMv2 and CredSSP are gfopenntlm.library (DalsinAI/gfopenntlm, pinned in
+tools/fetch_deps.sh), written for it the same way.
 
 MIT licensed (LICENSE), Copyright (c) 2026 AmiCradle Team.
 
@@ -48,7 +48,6 @@ Specifications used:
 |-----|------|
 | src/core | the protocol: stream reader/writer, X.224, transport, connection sequence |
 | src/crypto | X.509 reader |
-| libs/gfopenntlm | gfopenntlm.library: MD4, RC4, HMAC-MD5, NTLMv2, CredSSP (its own README) |
 | src/codec | bitmap decoders (later) |
 | src/amiga | "amipr": the Amiga layer (timer.device, signals, dos, bsdsocket, GFOpenTLS/GFOpenCrypto) |
 | src/ui | the windows: connection, session, desktop drawing, favourites |

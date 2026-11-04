@@ -21,6 +21,9 @@ struct rdp_settings
 	uint16_t width, height;
 	uint8_t depth;            /* 8, 15, 16, 24 */
 	int64_t timeout_us;
+	const char* nla_dump;     /* NULL, or a file for the NLA TSRequests in hex: the NEGOTIATE,
+	                             the CHALLENGE, the AUTHENTICATE and the server's answer to it;
+	                             never the TSCredentials (they hold the sealed password) */
 };
 
 void rdp_settings_default(struct rdp_settings* s);

@@ -5,7 +5,9 @@
  * through gfopenntlm.library); prints what the computer chose, its
  * certificate and the logon's result. The password is never printed.
  *
- *   RDPProbe HOST/A PORT/N USER/K DOMAIN/K PASSWORD/K RDP/S TLS/S NLA/S
+ *   RDPProbe HOST/A PORT/N USER/K DOMAIN/K PASSWORD/K RDP/S TLS/S NLA/S DUMP/K
+ * DUMP=file: the NLA exchange in hex, up to the AUTHENTICATE and the
+ * server's answer (never the credentials), to check a logon offline.
  * MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #include "connect.h"
@@ -22,8 +24,8 @@
 
 static const char version[] = "$VER: RDPProbe 0.2 (04.11.2026) AmiCradle Team";
 
-#define TEMPLATE "HOST/A,PORT/N,USER/K,DOMAIN/K,PASSWORD/K,RDP/S,TLS/S,NLA/S"
-enum { A_HOST, A_PORT, A_USER, A_DOMAIN, A_PASSWORD, A_RDP, A_TLS, A_NLA, A_N };
+#define TEMPLATE "HOST/A,PORT/N,USER/K,DOMAIN/K,PASSWORD/K,RDP/S,TLS/S,NLA/S,DUMP/K"
+enum { A_HOST, A_PORT, A_USER, A_DOMAIN, A_PASSWORD, A_RDP, A_TLS, A_NLA, A_DUMP, A_N };
 
 /* "YYMMDDhhmmssZ" (UTCTime, RFC 5280: YY < 50 is 20YY) or "YYYYMMDDhhmmssZ"
  * (GeneralizedTime) as "YYYY-MM-DD hh:mm:ss UTC"; anything else as it is */
@@ -178,6 +180,7 @@ int main(void)
 		s.port = (uint16_t) * (LONG*)args[A_PORT];
 	s.user = (const char*)args[A_USER];
 	s.domain = (const char*)args[A_DOMAIN];
+	s.nla_dump = (const char*)args[A_DUMP];
 	if (args[A_RDP] || args[A_TLS] || args[A_NLA])
 		s.protocols = (args[A_TLS] ? RDP_PROTOCOL_SSL : 0) | (args[A_NLA] ? RDP_PROTOCOL_HYBRID : 0);
 

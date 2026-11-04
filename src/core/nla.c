@@ -10,6 +10,7 @@
 
 #include <exec/memory.h>
 #include <proto/exec.h>
+#include <proto/dos.h>
 #include <proto/gfopenntlm.h>
 #include <string.h>
 
@@ -70,6 +71,30 @@ const char* rdp_ntstatus_text(uint32_t code)
 	return i < 0 ? NULL : statuses[i].text;
 }
 
+/* s->nla_dump: one TSRequest as a line of hex, "C>S 1 <hex>" or "S>C 1 <hex>" */
+static void dump_line(BPTR f, const char* dir, int n, const uint8_t* p, size_t len)
+{
+	static const char hx[] = "0123456789abcdef";
+	char line[80];
+	size_t i, k = 0;
+	if (!f)
+		return;
+	line[k++] = dir[0]; line[k++] = dir[1]; line[k++] = dir[2]; line[k++] = ' ';
+	line[k++] = (char)('0' + n); line[k++] = ' ';
+	for (i = 0; i < len; i++)
+	{
+		line[k++] = hx[p[i] >> 4];
+		line[k++] = hx[p[i] & 15];
+		if (k >= sizeof(line) - 2)
+		{
+			Write(f, line, (LONG)k);
+			k = 0;
+		}
+	}
+	line[k++] = '\n';
+	Write(f, line, (LONG)k);
+}
+
 /* one TSRequest: a DER SEQUENCE, read as its length says */
 static int read_tsrequest(struct rdp_transport* t, uint8_t* buf, size_t size)
 {
@@ -111,6 +136,7 @@ int rdp_nla(struct rdp_transport* t, const struct rdp_settings* s, const char* p
 	ULONG outlen = 0;
 	LONG r, err = 0;
 	int rc = 0, inlen = 0;
+	BPTR dump = 0;
 
 	memset(res, 0, sizeof(*res));
 #ifndef GFOPENNTLM_STATIC
@@ -136,6 +162,8 @@ int rdp_nla(struct rdp_transport* t, const struct rdp_settings* s, const char* p
 		rc = RDP_E_NLA;
 		goto done;
 	}
+	if (s->nla_dump)
+		dump = Open((CONST_STRPTR)s->nla_dump, MODE_NEWFILE);
 	for (;;)
 	{
 		r = GN_CredSSPStep(c, res->stage ? in : NULL, (ULONG)inlen, out, GN_CREDSSP_BUFFER, &outlen);
@@ -146,6 +174,8 @@ int rdp_nla(struct rdp_transport* t, const struct rdp_settings* s, const char* p
 			rc = RDP_E_NLA;
 			break;
 		}
+		if (res->stage < 2)  /* not the TSCredentials */
+			dump_line(dump, "C>S", res->stage + 1, out, outlen);
 		rc = rdp_transport_write(t, out, outlen);
 		memset(out, 0, outlen);  /* the last one holds the sealed password */
 		if (rc < 0)
@@ -161,7 +191,11 @@ int rdp_nla(struct rdp_transport* t, const struct rdp_settings* s, const char* p
 				res->closed_after = res->stage;
 			break;
 		}
+		if (res->stage <= 2)
+			dump_line(dump, "S>C", res->stage, in, (size_t)inlen);
 	}
+	if (dump)
+		Close(dump);
 	res->version = GN_CredSSPGetAttr(c, GNA_VERSION);
 	res->peer_version = GN_CredSSPGetAttr(c, GNA_PEERVERSION);
 	res->ntlm_peer_version = GN_CredSSPGetAttr(c, GNA_NTLMPEERVERSION);

@@ -9,6 +9,8 @@
 #include "ui.h"
 #include "amipr.h"
 #include "connect.h"
+#include "nla.h"
+#include "x509.h"
 
 #include <exec/types.h>
 #include <intuition/intuition.h>
@@ -171,8 +173,36 @@ static void do_delete(struct cw* c)
 	set_status(c, "Deleted the favourite.");
 }
 
-/* the real connection's first steps: TCP, the X.224 negotiation, TLS */
-static int probe(struct cw* c, struct session_info* info, ULONG protocols)
+/* NLA's result for the status line; the password is never shown */
+static void nla_status(struct cw* c, int rc, const struct rdp_nla_result* r)
+{
+	char line[200];
+	const char* text;
+
+	if (rc == RDP_E_NLA && r->gnerr == GNERR_SERVER)
+	{
+		text = rdp_ntstatus_text(r->server_error);
+		if (text)
+			snprintf(line, sizeof(line), "Logon refused: %s", text);
+		else
+			snprintf(line, sizeof(line), "Logon refused (0x%08lX).", (unsigned long)r->server_error);
+	}
+	else if (rc == RDP_E_NLA && r->early_auth)
+		snprintf(line, sizeof(line), "Logon refused: access denied.");
+	else if (rc == RDP_E_NLA)
+		snprintf(line, sizeof(line), "Logon failed: %s", r->lib_error ? r->lib_error : "?");
+	else if (r->closed_after == 2)
+		snprintf(line, sizeof(line), "The computer closed the connection: the user name or password may be wrong.");
+	else if (rc == AMIPR_ENOLIB)
+		snprintf(line, sizeof(line), "gfopenntlm.library is missing from LIBS:.");
+	else
+		snprintf(line, sizeof(line), "%s", rdp_error_text(rc));
+	set_status(c, line);
+}
+
+/* the real connection's first steps: TCP, the X.224 negotiation, TLS,
+ * and NLA's logon when the computer chose it */
+static int probe(struct cw* c, struct session_info* info, ULONG protocols, const char* password)
 {
 	struct rdp_settings s;
 	struct rdp_transport t;
@@ -213,6 +243,36 @@ static int probe(struct cw* c, struct session_info* info, ULONG protocols)
 		set_status(c, line);
 		rdp_transport_close(&t);
 		return 0;
+	}
+	if (cc.selected & (RDP_PROTOCOL_HYBRID | RDP_PROTOCOL_HYBRID_EX))
+	{
+		const uint8_t* der;
+		size_t len;
+		struct rdp_x509 x;
+		struct rdp_nla_result nr;
+
+		if (!info->user[0])
+		{
+			set_status(c, "This computer needs a user name and password first (NLA).");
+			olui_focus(c->ui, c->user);
+			rdp_transport_close(&t);
+			return 0;
+		}
+		if (amipr_tls_peer_certificate(t.tls, &der, &len) != 0 || rdp_x509_parse(&x, der, len) != 0)
+		{
+			set_status(c, "The computer's certificate could not be read.");
+			rdp_transport_close(&t);
+			return 0;
+		}
+		set_status(c, "Logging on...");
+		olui_amiga_draw(c->a);
+		rc = rdp_nla(&t, &s, password, x.pubkey, x.pubkey_len, (cc.selected & RDP_PROTOCOL_HYBRID_EX) != 0, &nr);
+		if (rc != 0)
+		{
+			nla_status(c, rc, &nr);
+			rdp_transport_close(&t);
+			return 0;
+		}
 	}
 	snprintf(info->security, sizeof(info->security), "%s, %s %s",
 	         cc.selected == RDP_PROTOCOL_SSL ? "TLS" : "NLA",
@@ -259,7 +319,7 @@ static void do_connect(struct cw* c)
 	{
 		int s = olui_select_index(c->sec);
 		if (s < 0 || s >= ui_nsecurity) s = 0;
-		if (probe(c, info, ui_security[s].protocols))
+		if (probe(c, info, ui_security[s].protocols, olui_get_text(c->password)))
 			c->result = 1;
 	}
 }

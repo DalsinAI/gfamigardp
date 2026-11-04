@@ -4,8 +4,13 @@ GFAmigaRDP 0.1 - on an AmiCradle lab machine
 What is here (copy the whole drawer, e.g. to Work:GFAmigaRDP/):
 
   GFAmigaRDP           the client (68040, soft float: no FPU needed)
-  tools/RDPProbe       TCP + X.224 + TLS from the Shell, against a real computer
+  tools/RDPProbe       TCP + X.224 + TLS + NLA from the Shell, against a real computer
   tests/X224Test       the X.224 encoder/decoder checks (prints "x224: ok")
+  tests/GFOpenNTLMVectors    gfopenntlm's checks (MS-NLMP 4.2 and RFC vectors), linked in
+  tests/GFOpenNTLMLibTest    the same API through LIBS:gfopenntlm.library
+  tests/GFOpenNTLMStaticTest the API linked in
+  Libs/gfopenntlm.library    NTLMv2 and CredSSP for NLA: copy to LIBS:
+  Libs/gfopentls.library, Libs/gfopencrypto.library   TLS: copy to LIBS:
   Themes/*.theme       GFOpenGadTools themes: Open, Classic, Graphite, Glass, Clear, Sky, Ember
   Env/GFOpenGadTools/Look   "Open": the theme to use
   lib/libolui.a        the GFOpenLayout UI library, for reference only: it is
@@ -25,7 +30,8 @@ Needs
   through WritePixelArray; without it the desktop is dithered to pens with
   WriteChunkyPixels.
   For a real connection only: bsdsocket.library v4 (Roadshow or another
-  stack), gfopentls.library and gfopencrypto.library in LIBS:.
+  stack), gfopentls.library and gfopencrypto.library in LIBS:, and for NLA
+  gfopenntlm.library 1 too (it opens gfopentls.library for random bytes).
 
 Install the theme (once)
   Copy Themes/#?.theme SYS:Prefs/Presets/Themes/
@@ -50,3 +56,8 @@ Screenshots - no server needed
 Real connection (connection initiation only in 0.1)
   GFAmigaRDP                         the window; Connect probes the computer
   tools/RDPProbe HOST=192.168.1.10   prints what the computer chose
+  tools/RDPProbe 192.168.1.10 USER=alice DOMAIN=LAB PASSWORD=...
+      also logs on with NLA (CredSSP over NTLMv2) and prints the result: the
+      server's errorCode as an NTSTATUS name when it refuses. The password
+      is never printed (but it is in the Shell's history: type it in a
+      Shell you close afterwards).

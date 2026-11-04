@@ -9,10 +9,14 @@
 #             gfopentls, gfopenlayout and amicradle-guest at pinned commits,
 #             fetched by tools/fetch_deps.sh, or the checkouts named in
 #             GFOPENSDK=, GFOPENTLS=, OLUI= and OGT_GUEST=
+#   NTLM      shared (default: gfopenntlm.library, opened at run time) or
+#             static (libgfopenntlm.a linked in)
+#   GFOPENNTLM  the gfopenntlm checkout (default libs/gfopenntlm)
 # Outputs: GFAmigaRDP (the client: "GFAmigaRDP DEMO" and "GFAmigaRDP DEMO
 # SESSION" need no server), tools/RDPProbe, tests/X224Test, Themes/*.theme,
 # Env/GFOpenGadTools/Look, README-lab.txt, Libs/gfopentls.library and
 # Libs/gfopencrypto.library (from the pinned gfopentls; LIBS=0 skips them),
+# Libs/gfopenntlm.library (NLA's NTLM and CredSSP), tests/GFOpenNTLM*,
 # tools/GFOpenTLSClient; lib/libolui.a for reference.
 # MIT, Copyright (c) 2026 AmiCradle Team.
 set -eu
@@ -51,6 +55,20 @@ if [ ! -f "$LIBOLUI" ] || [ "$(cat "$WORK/olui/.pin" 2>/dev/null)" != "$(cat "$O
     cat "$OLUI/.pin" > "$WORK/olui/.pin" 2>/dev/null || :
 fi
 
+# gfopenntlm (NTLM and CredSSP for NLA), built by its own script with this
+# stove: the library, libgfopenntlm.a and the headers GFAmigaRDP uses
+GFOPENNTLM=${GFOPENNTLM:-"$HERE/libs/gfopenntlm"}
+GN="$WORK/gfopenntlm"
+echo "building gfopenntlm"
+STOVE="$STOVE" CC_AMIGA="$CC" AR_AMIGA="${AR:-${CC%gcc}ar}" CPU="${CPU:-040}" OUT="$GN" \
+    sh "$GFOPENNTLM/build-amiga.sh" > "$WORK/gfopenntlm.log" 2>&1 || { tail -30 "$WORK/gfopenntlm.log"; exit 1; }
+grep -E "^(passed|failed|PASS|FAIL)|passed, " "$WORK/gfopenntlm.log" || :
+case "${NTLM:-shared}" in
+    shared) GNFLAGS="" GNLIB="" ;;
+    static) GNFLAGS="-DGFOPENNTLM_STATIC" GNLIB="$GN/lib/libgfopenntlm.a" ;;
+    *) echo "NTLM is shared or static"; exit 2 ;;
+esac
+
 # OpenNDK's headers first, then the compiler's and libnix's own
 GCCINC=$("$CC" -print-file-name=include)
 INC="-nostdinc -isystem $GCCINC -isystem $OPENNDK/Include_H"
@@ -63,7 +81,7 @@ done
 CFLAGS="$CPUFLAGS $INC -D__AMIGA__ -DAMIGAOS3 -noixemul -std=gnu99 -O2 \
   -fno-delete-null-pointer-checks -fno-late-combine-instructions -Wall -Wextra \
   -I$HERE/src/amiga -I$HERE/src/crypto -I$HERE/src/core -I$HERE/src/ui \
-  -I$GFOPENTLS/include -I$OLUI/include"
+  -I$GFOPENTLS/include -I$OLUI/include -I$GN/include $GNFLAGS"
 
 mkdir -p "$WORK/obj" "$OUT/tools" "$OUT/tests" "$OUT/lib" "$OUT/Themes" "$OUT/Env/GFOpenGadTools"
 LOG="$OUT/warnings.log"
@@ -72,7 +90,7 @@ LOG="$OUT/warnings.log"
 OBJS=""
 for f in src/amiga/amipr_init.c src/amiga/amipr_time.c src/amiga/amipr_atomic.c src/amiga/amipr_wait.c \
          src/amiga/amipr_dos.c src/amiga/amipr_net.c src/amiga/amipr_crypto.c src/amiga/amipr_tls.c \
-         src/crypto/x509.c src/core/x224.c src/core/transport.c src/core/connect.c; do
+         src/crypto/x509.c src/core/x224.c src/core/transport.c src/core/connect.c src/core/nla.c; do
     o="$WORK/obj/$(basename "$f" .c).o"
     "$CC" $CFLAGS -c "$HERE/$f" -o "$o" 2>>"$LOG"
     OBJS="$OBJS $o"
@@ -85,10 +103,13 @@ for f in src/ui/main.c src/ui/connect_win.c src/ui/session_win.c src/ui/desktop.
     UIOBJS="$UIOBJS $o"
 done
 
-"$CC" $CFLAGS -s -o "$OUT/GFAmigaRDP" $UIOBJS $OBJS "$LIBOLUI" -lamiga 2>>"$LOG"
-"$CC" $CFLAGS -s -o "$OUT/tools/RDPProbe" "$HERE/tests/rdpprobe.c" $OBJS -lamiga 2>>"$LOG"
+"$CC" $CFLAGS -s -o "$OUT/GFAmigaRDP" $UIOBJS $OBJS "$LIBOLUI" $GNLIB -lamiga 2>>"$LOG"
+"$CC" $CFLAGS -s -o "$OUT/tools/RDPProbe" "$HERE/tests/rdpprobe.c" $OBJS $GNLIB -lamiga 2>>"$LOG"
 "$CC" $CFLAGS -s -o "$OUT/tests/X224Test" "$HERE/tests/x224_test.c" "$WORK/obj/x224.o" 2>>"$LOG"
 cp "$LIBOLUI" "$OUT/lib/libolui.a"
+mkdir -p "$OUT/Libs"
+cp "$GN/lib/gfopenntlm.library" "$OUT/Libs/"
+cp "$GN/tests/GFOpenNTLMLibTest" "$GN/tests/GFOpenNTLMStaticTest" "$GN/tests/GFOpenNTLMVectors" "$OUT/tests/"
 
 # the GFOpenGadTools theme GFAmigaRDP's windows are drawn in: ENV:GFOpenGadTools/Look
 # names SYS:Prefs/Presets/Themes/<Look>.theme ("Open" when unset)
@@ -113,9 +134,9 @@ if [ "${LIBS:-1}" != 0 ]; then
 fi
 
 W=$(grep -c "warning:" "$LOG" || true)
-for f in GFAmigaRDP tools/RDPProbe tests/X224Test; do
+for f in GFAmigaRDP tools/RDPProbe tests/X224Test Libs/gfopenntlm.library; do
     echo "$OUT/$f ($(wc -c < "$OUT/$f") bytes)"
 done
 echo "themes: $(ls "$OUT/Themes" 2>/dev/null | tr '\n' ' ')"
 echo "warnings: $W (warnings.log)"
-(cd "$OUT" && sha256sum GFAmigaRDP tools/RDPProbe tests/X224Test $(ls Libs/*.library 2>/dev/null) > SHA256SUMS && cat SHA256SUMS)
+(cd "$OUT" && sha256sum GFAmigaRDP tools/RDPProbe tests/X224Test tests/GFOpenNTLM* $(ls Libs/*.library 2>/dev/null) > SHA256SUMS && cat SHA256SUMS)

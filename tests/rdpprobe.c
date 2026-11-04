@@ -21,6 +21,28 @@ static const char version[] = "$VER: RDPProbe 0.1 (04.11.2026) AmiCradle Team";
 #define TEMPLATE "HOST/A,PORT/N,USER/K,RDP/S,TLS/S,NLA/S"
 enum { A_HOST, A_PORT, A_USER, A_RDP, A_TLS, A_NLA, A_N };
 
+/* "YYMMDDhhmmssZ" (UTCTime, RFC 5280: YY < 50 is 20YY) or "YYYYMMDDhhmmssZ"
+ * (GeneralizedTime) as "YYYY-MM-DD hh:mm:ss UTC"; anything else as it is */
+static const char* cert_time(const char* t, char out[24])
+{
+	size_t n = strlen(t);
+	char y[5];
+	if (n == 13 && t[12] == 'Z')
+	{
+		snprintf(y, sizeof(y), "%s%.2s", t[0] < '5' ? "20" : "19", t);
+		t += 2;
+	}
+	else if (n == 15 && t[14] == 'Z')
+	{
+		snprintf(y, sizeof(y), "%.4s", t);
+		t += 4;
+	}
+	else
+		return t;
+	snprintf(out, 24, "%s-%.2s-%.2s %.2s:%.2s:%.2s UTC", y, t, t + 2, t + 4, t + 6, t + 8);
+	return out;
+}
+
 int main(void)
 {
 	LONG args[A_N] = { 0 };
@@ -56,8 +78,9 @@ int main(void)
 	rc = rdp_transport_connect(&t, s.host, s.port, s.timeout_us);
 	if (rc == 0)
 	{
-		printf("Connected. Asking for %s%s%s.\n", s.protocols & RDP_PROTOCOL_SSL ? "TLS " : "",
-		       s.protocols & RDP_PROTOCOL_HYBRID ? "NLA " : "", s.protocols ? "" : "standard RDP security");
+		printf("Connected. Asking for %s%s%s.\n", s.protocols & RDP_PROTOCOL_SSL ? "TLS" : "",
+		       (s.protocols & (RDP_PROTOCOL_SSL | RDP_PROTOCOL_HYBRID)) == (RDP_PROTOCOL_SSL | RDP_PROTOCOL_HYBRID) ? " or " : "",
+		       s.protocols & RDP_PROTOCOL_HYBRID ? "NLA" : (s.protocols ? "" : "standard RDP security"));
 		rc = rdp_negotiate(&t, &s, &cc);
 	}
 	if (rc == 0)
@@ -86,7 +109,12 @@ int main(void)
 						uint8_t fp[32];
 						struct amipr_hash h;
 						int i;
-						printf("Certificate: %s (%lu-bit key, valid to %s)\n", name, (unsigned long)x.key_bits, x.not_after);
+						char from[24], to[24];
+						printf("Certificate: %s (%lu-bit %s key)\n", name, (unsigned long)x.key_bits, x.key_rsa ? "RSA" : "non-RSA");
+						if (rdp_x509_name_string(x.issuer, x.issuer_len, name, sizeof(name)) == 0)
+							printf("Issued by: %s%s\n", name,
+							       x.issuer_len == x.subject_len && memcmp(x.issuer, x.subject, x.subject_len) == 0 ? " (self-signed)" : "");
+						printf("Valid: %s to %s\n", cert_time(x.not_before, from), cert_time(x.not_after, to));
 						amipr_hash_init(&h, AMIPR_SHA256);
 						amipr_hash_update(&h, der, len);
 						amipr_hash_final(&h, fp, sizeof(fp));

@@ -1,0 +1,421 @@
+TABLE OF CONTENTS
+
+gfopenntlm.library/--background--
+gfopenntlm.library/GN_Version
+gfopenntlm.library/GN_ErrorText
+gfopenntlm.library/GN_NTLMNew
+gfopenntlm.library/GN_NTLMFree
+gfopenntlm.library/GN_NTLMNegotiate
+gfopenntlm.library/GN_NTLMAuthenticate
+gfopenntlm.library/GN_NTLMWrap
+gfopenntlm.library/GN_NTLMUnwrap
+gfopenntlm.library/GN_NTLMGetAttr
+gfopenntlm.library/GN_CredSSPNew
+gfopenntlm.library/GN_CredSSPFree
+gfopenntlm.library/GN_CredSSPStep
+gfopenntlm.library/GN_CredSSPGetAttr
+gfopenntlm.library/GN_CredSSPMessageLength
+gfopenntlm.library/GN_Digest
+gfopenntlm.library/GN_HMAC
+gfopenntlm.library/GN_RC4
+
+gfopenntlm.library/--background--               gfopenntlm.library/--background--
+
+    PURPOSE
+        NTLMv2 authentication ([MS-NLMP]) and the Credential Security
+        Support Provider protocol ([MS-CSSP]) for AmigaOS 3.x on 68020 and
+        up: the Network Level Authentication of an RDP client, and NTLM for
+        anything else that needs it.
+
+        MIT licensed. Copyright (c) 2026 AmiCradle Team. Written from
+        Microsoft's published Open Specifications and the RFCs only (see
+        README.md, "Clean room").
+
+    CONVENTIONS
+        The handles (struct GNNTLM, struct GNCredSSP) are opaque. Config
+        structures begin with Size; clear them, set Size to their sizeof and
+        fill in the fields. A later library accepts an older, smaller Size.
+
+        Calls that answer a LONG answer GNERR_OK (0), GNERR_CONTINUE (1) or
+        a negative GNERR_ code (libraries/gfopenntlm.h). Buffers are the
+        caller's: each call takes the output buffer's size and writes the
+        length it used.
+
+        Strings are UTF-8, converted to UTF-16LE as the protocols need.
+
+        A handle belongs to one task at a time. Separate handles can be used
+        by separate tasks at once.
+
+    RANDOM NUMBERS
+        Client challenges, session keys and CredSSP nonces come from
+        gfopentls.library 1's OT_Random(), opened on first use. Without it
+        those calls answer GNERR_NORANDOM.
+
+    STATIC LINKING
+        Define GFOPENNTLM_STATIC before <proto/gfopenntlm.h> and link
+        lib/libgfopenntlm.a: the same calls, no library base.
+
+    SECURITY
+        A password given to GN_NTLMNew() is turned into its NT hash and not
+        kept. GN_CredSSPNew() keeps it (CredSSP delegates it to the server
+        in TSPasswordCreds) and wipes it in GN_CredSSPFree(). Key material
+        is wiped when a handle is freed. NTLM is old cryptography (MD4, MD5,
+        RC4); [MS-NLMP] section 5 says more.
+
+gfopenntlm.library/GN_Version                       gfopenntlm.library/GN_Version
+
+    NAME
+        GN_Version -- the library's API version (V1)
+
+    SYNOPSIS
+        version = GN_Version()
+        D0
+
+        ULONG GN_Version(VOID);
+
+    RESULT
+        (version << 16) | revision, 0x00010000 for 1.0.
+
+gfopenntlm.library/GN_ErrorText                   gfopenntlm.library/GN_ErrorText
+
+    NAME
+        GN_ErrorText -- English text for a GNERR_ code (V1)
+
+    SYNOPSIS
+        text = GN_ErrorText(error)
+        D0                  D0
+
+        CONST_STRPTR GN_ErrorText(LONG error);
+
+    RESULT
+        A constant string; never NULL.
+
+gfopenntlm.library/GN_NTLMNew                       gfopenntlm.library/GN_NTLMNew
+
+    NAME
+        GN_NTLMNew -- an NTLMv2 client context (V1)
+
+    SYNOPSIS
+        ntlm = GN_NTLMNew(config, error)
+        D0                A0      A1
+
+        struct GNNTLM *GN_NTLMNew(CONST struct GNNTLMConfig *config,
+                                  LONG *error);
+
+    FUNCTION
+        Makes a client context for one NTLM exchange ([MS-NLMP] 3.1.5.1)
+        with User, Domain, Password, Workstation and TargetName (the
+        service principal name sent in MsvAvTargetName, or NULL).
+
+        The client offers UNICODE, REQUEST_TARGET, SIGN, SEAL, NTLM,
+        ALWAYS_SIGN, EXTENDED_SESSIONSECURITY, TARGET_INFO, VERSION, 128,
+        KEY_EXCH and 56, and answers with NTLMv2 only.
+
+    INPUTS
+        config - the configuration (see CONVENTIONS)
+        error  - where to put a GNERR_ code, or NULL
+
+    RESULT
+        The context, or NULL with *error set.
+
+    SEE ALSO
+        GN_NTLMFree(), GN_NTLMNegotiate()
+
+gfopenntlm.library/GN_NTLMFree                     gfopenntlm.library/GN_NTLMFree
+
+    NAME
+        GN_NTLMFree -- free an NTLM context (V1)
+
+    SYNOPSIS
+        GN_NTLMFree(ntlm)
+                    A0
+
+        VOID GN_NTLMFree(struct GNNTLM *ntlm);
+
+    FUNCTION
+        Wipes the context's keys and frees it. NULL is allowed.
+
+gfopenntlm.library/GN_NTLMNegotiate           gfopenntlm.library/GN_NTLMNegotiate
+
+    NAME
+        GN_NTLMNegotiate -- the NEGOTIATE_MESSAGE (V1)
+
+    SYNOPSIS
+        result = GN_NTLMNegotiate(ntlm, out, size, length)
+        D0                        A0    A1   D0    A2
+
+        LONG GN_NTLMNegotiate(struct GNNTLM *ntlm, APTR out, ULONG size,
+                              ULONG *length);
+
+    FUNCTION
+        Writes the first message ([MS-NLMP] 2.2.1.1), 40 bytes, and keeps
+        a copy for the AUTHENTICATE message's MIC.
+
+    RESULT
+        GNERR_OK, GNERR_BUFFER, GNERR_STATE (called twice).
+
+gfopenntlm.library/GN_NTLMAuthenticate     gfopenntlm.library/GN_NTLMAuthenticate
+
+    NAME
+        GN_NTLMAuthenticate -- answer a CHALLENGE_MESSAGE (V1)
+
+    SYNOPSIS
+        result = GN_NTLMAuthenticate(ntlm, challenge, challengeLength,
+        D0                           A0    A1         D0
+                                     out, size, length)
+                                     A2   D1    A3
+
+        LONG GN_NTLMAuthenticate(struct GNNTLM *ntlm, CONST_APTR challenge,
+                                 ULONG challengeLength, APTR out,
+                                 ULONG size, ULONG *length);
+
+    FUNCTION
+        Reads the server's CHALLENGE_MESSAGE (2.2.1.2) and writes the
+        AUTHENTICATE_MESSAGE (2.2.1.3) with an NTLMv2 response (3.3.2).
+        The server's AV pairs are sent back with MsvAvFlags (MIC present),
+        MsvAvTargetName and an all-zero MsvChannelBindings, and the MIC is
+        computed (3.1.5.1.2). The time is the server's MsvAvTimestamp when
+        it sends one (then the LM response is Z(24)), else the Amiga clock.
+        With KEY_EXCH a random session key is sent encrypted with RC4.
+        Afterwards the context can GN_NTLMWrap() and GN_NTLMUnwrap().
+
+        Whether the password was right is not known here: the server says.
+
+    RESULT
+        GNERR_OK; GNERR_PROTOCOL (a malformed challenge), GNERR_UNSUPPORTED
+        (no UNICODE or no target info: NTLMv1 servers), GNERR_NORANDOM,
+        GNERR_BUFFER, GNERR_STATE.
+
+gfopenntlm.library/GN_NTLMWrap                     gfopenntlm.library/GN_NTLMWrap
+
+    NAME
+        GN_NTLMWrap -- seal and sign a message (V1)
+
+    SYNOPSIS
+        result = GN_NTLMWrap(ntlm, in, inLength, out, size, length)
+        D0                   A0    A1  D0        A2   D1    A3
+
+        LONG GN_NTLMWrap(struct GNNTLM *ntlm, CONST_APTR in, ULONG inLength,
+                         APTR out, ULONG size, ULONG *length);
+
+    FUNCTION
+        GSS_WrapEx() ([MS-NLMP] 3.4.6) with extended session security:
+        out is the 16-byte signature (3.4.4.2) followed by the sealed
+        message, inLength + 16 bytes. Each call uses the next sequence
+        number, from 0.
+
+    RESULT
+        GNERR_OK, GNERR_BUFFER, GNERR_STATE (before authentication),
+        GNERR_UNSUPPORTED (no extended session security).
+
+gfopenntlm.library/GN_NTLMUnwrap                 gfopenntlm.library/GN_NTLMUnwrap
+
+    NAME
+        GN_NTLMUnwrap -- unseal and verify a message from the server (V1)
+
+    SYNOPSIS
+        result = GN_NTLMUnwrap(ntlm, in, inLength, out, size, length)
+        D0                     A0    A1  D0        A2   D1    A3
+
+        LONG GN_NTLMUnwrap(struct GNNTLM *ntlm, CONST_APTR in,
+                           ULONG inLength, APTR out, ULONG size,
+                           ULONG *length);
+
+    FUNCTION
+        GSS_UnwrapEx() (3.4.7): the reverse of GN_NTLMWrap() with the
+        server-to-client keys and the server's sequence numbers.
+
+    RESULT
+        GNERR_OK; GNERR_INTEGRITY when the signature or sequence number is
+        wrong (out is cleared), GNERR_PROTOCOL, GNERR_BUFFER, GNERR_STATE.
+
+gfopenntlm.library/GN_NTLMGetAttr               gfopenntlm.library/GN_NTLMGetAttr
+
+    NAME
+        GN_NTLMGetAttr -- read a value from an NTLM context (V1)
+
+    SYNOPSIS
+        value = GN_NTLMGetAttr(ntlm, attr)
+        D0                     A0    D0
+
+        ULONG GN_NTLMGetAttr(struct GNNTLM *ntlm, ULONG attr);
+
+    INPUTS
+        attr - GNA_NTLMFLAGS (the negotiated flags), GNA_NTLMPEERVERSION
+               (the CHALLENGE's Version field: major, minor and build as
+               little-endian bytes 0 to 3), GNA_STATE.
+
+    RESULT
+        The value, 0 for an unknown attribute.
+
+gfopenntlm.library/GN_CredSSPNew                   gfopenntlm.library/GN_CredSSPNew
+
+    NAME
+        GN_CredSSPNew -- a CredSSP client over NTLM (V1)
+
+    SYNOPSIS
+        credssp = GN_CredSSPNew(config, error)
+        D0                      A0      A1
+
+        struct GNCredSSP *GN_CredSSPNew(CONST struct GNCredSSPConfig *config,
+                                        LONG *error);
+
+    FUNCTION
+        Makes a client for one CredSSP exchange ([MS-CSSP] 3.1.5) after a
+        TLS handshake: NTLM in negoTokens, the TLS binding in pubKeyAuth,
+        then the user's TSPasswordCreds in authInfo.
+
+        PublicKey/PublicKeyLength is the server certificate's
+        SubjectPublicKey: the contents of the BIT STRING in
+        SubjectPublicKeyInfo without its unused-bits byte (for RSA, the DER
+        RSAPublicKey SEQUENCE). ServerName gives the SPN TERMSRV/ServerName.
+        MaxVersion is the TSRequest version offered, 2 to 6 (0 means 6); the
+        exchange uses the lower of it and the server's.
+
+    RESULT
+        The context, or NULL with *error set (GNERR_BADARGS without a
+        public key).
+
+gfopenntlm.library/GN_CredSSPFree                 gfopenntlm.library/GN_CredSSPFree
+
+    NAME
+        GN_CredSSPFree -- free a CredSSP context (V1)
+
+    SYNOPSIS
+        GN_CredSSPFree(credssp)
+                       A0
+
+        VOID GN_CredSSPFree(struct GNCredSSP *credssp);
+
+    FUNCTION
+        Wipes the password and keys and frees the context. NULL is allowed.
+
+gfopenntlm.library/GN_CredSSPStep                 gfopenntlm.library/GN_CredSSPStep
+
+    NAME
+        GN_CredSSPStep -- the next CredSSP message (V1)
+
+    SYNOPSIS
+        result = GN_CredSSPStep(credssp, in, inLength, out, size, length)
+        D0                      A0       A1  D0        A2   D1    A3
+
+        LONG GN_CredSSPStep(struct GNCredSSP *credssp, CONST_APTR in,
+                            ULONG inLength, APTR out, ULONG size,
+                            ULONG *length);
+
+    FUNCTION
+        Call it first with in = NULL, then with each TSRequest the server
+        sends, until it answers GNERR_OK or an error. Send out (length
+        bytes) over the TLS connection after each GNERR_CONTINUE and after
+        GNERR_OK.
+
+          1. no input: TSRequest { version, negoTokens: NEGOTIATE }
+          2. the server's CHALLENGE: TSRequest { version, negoTokens:
+             AUTHENTICATE, pubKeyAuth, clientNonce (version 5 and up) }
+          3. the server's pubKeyAuth, checked (the SHA-256 binding hash for
+             version 5 and up, the public key + 1 below): TSRequest {
+             version, authInfo: the sealed TSCredentials }; GNERR_OK.
+
+        A TSRequest is a DER SEQUENCE; GN_CredSSPMessageLength() finds the
+        end of one in a TLS stream. A buffer of GN_CREDSSP_BUFFER bytes
+        always takes the output.
+
+        After GNERR_OK an RDP client goes on with the next step of its own
+        protocol (for HYBRID_EX, the Early User Authorization Result).
+
+    RESULT
+        GNERR_CONTINUE, GNERR_OK, or an error that ends the exchange:
+        GNERR_SERVER - the server sent errorCode, an NTSTATUS
+                       (GN_CredSSPGetAttr(GNA_SERVERERROR)), for example
+                       0xC000006D STATUS_LOGON_FAILURE
+        GNERR_PUBKEY - the server's pubKeyAuth does not match: a different
+                       TLS key (a man in the middle) or a broken server
+        GNERR_INTEGRITY, GNERR_PROTOCOL, GNERR_UNSUPPORTED, GNERR_NORANDOM,
+        GNERR_BUFFER, GNERR_NOMEM, GNERR_STATE.
+
+        A server that does not implement errorCode (CredSSP version 2)
+        closes the connection on a failed logon instead.
+
+gfopenntlm.library/GN_CredSSPGetAttr           gfopenntlm.library/GN_CredSSPGetAttr
+
+    NAME
+        GN_CredSSPGetAttr -- read a value from a CredSSP context (V1)
+
+    SYNOPSIS
+        value = GN_CredSSPGetAttr(credssp, attr)
+        D0                        A0       D0
+
+        ULONG GN_CredSSPGetAttr(struct GNCredSSP *credssp, ULONG attr);
+
+    INPUTS
+        attr - GNA_VERSION (the version in use), GNA_PEERVERSION (the
+               server's), GNA_SERVERERROR (its errorCode), GNA_STATE (0 to 3
+               as the exchange goes, 9 after an error), GNA_LASTERROR (the
+               GNERR_ code that ended it, as a ULONG), or an NTLM attribute
+               of GN_NTLMGetAttr().
+
+gfopenntlm.library/GN_CredSSPMessageLength
+                                     gfopenntlm.library/GN_CredSSPMessageLength
+
+    NAME
+        GN_CredSSPMessageLength -- the length of a TSRequest in a stream (V1)
+
+    SYNOPSIS
+        length = GN_CredSSPMessageLength(data, length)
+        D0                               A0    D0
+
+        LONG GN_CredSSPMessageLength(CONST_APTR data, ULONG length);
+
+    FUNCTION
+        From the first bytes of a DER message (at least 2; up to 5 for a
+        long length), the whole message's length.
+
+    RESULT
+        The length; 0 when more bytes are needed; GNERR_PROTOCOL when the
+        data is not a DER SEQUENCE.
+
+gfopenntlm.library/GN_Digest                           gfopenntlm.library/GN_Digest
+
+    NAME
+        GN_Digest -- MD4, MD5 or SHA-256 (V1)
+
+    SYNOPSIS
+        result = GN_Digest(algorithm, data, length, out)
+        D0                 D0         A0    D1      A1
+
+        LONG GN_Digest(ULONG algorithm, CONST_APTR data, ULONG length,
+                       APTR out);
+
+    INPUTS
+        algorithm - GNALG_MD4 (RFC 1320), GNALG_MD5 (RFC 1321): 16 bytes
+                    out; GNALG_SHA256 (FIPS 180-4): 32 bytes out
+
+gfopenntlm.library/GN_HMAC                               gfopenntlm.library/GN_HMAC
+
+    NAME
+        GN_HMAC -- HMAC-MD5 or HMAC-SHA-256 (V1)
+
+    SYNOPSIS
+        result = GN_HMAC(algorithm, key, keyLength, data, length, out)
+        D0               D0         A0   D1         A1    D2      A2
+
+        LONG GN_HMAC(ULONG algorithm, CONST_APTR key, ULONG keyLength,
+                     CONST_APTR data, ULONG length, APTR out);
+
+    INPUTS
+        algorithm - GNALG_MD5 or GNALG_SHA256 (RFC 2104)
+
+gfopenntlm.library/GN_RC4                                 gfopenntlm.library/GN_RC4
+
+    NAME
+        GN_RC4 -- RC4 in place, from a fresh key (V1)
+
+    SYNOPSIS
+        result = GN_RC4(key, keyLength, data, length)
+        D0              A0   D0         A1    D1
+
+        LONG GN_RC4(CONST_APTR key, ULONG keyLength, APTR data, ULONG length);
+
+    FUNCTION
+        Encrypts (or decrypts) data in place. For NTLM's own use only; RC4
+        is not a cipher for new protocols.

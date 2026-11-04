@@ -1,0 +1,29 @@
+==id $Id: gfopenntlm_lib.sfd 1.0 (04.11.2026) MIT, AmiCradle Team $
+* gfopenntlm.library: NTLMv2 ([MS-NLMP]) and CredSSP ([MS-CSSP]) for
+* AmigaOS 3.x. This file is the source of the fd, clib, inline and
+* library entry files: tools/gen_headers.py makes them.
+==base _GFOpenNTLMBase
+==basetype struct Library *
+==libname gfopenntlm.library
+==bias 30
+==public
+==include <libraries/gfopenntlm.h>
+* version 1
+ULONG GN_Version() ()
+CONST_STRPTR GN_ErrorText(LONG error) (d0)
+struct GNNTLM * GN_NTLMNew(CONST struct GNNTLMConfig * config, LONG * error) (a0,a1)
+VOID GN_NTLMFree(struct GNNTLM * ntlm) (a0)
+LONG GN_NTLMNegotiate(struct GNNTLM * ntlm, APTR out, ULONG size, ULONG * length) (a0,a1,d0,a2)
+LONG GN_NTLMAuthenticate(struct GNNTLM * ntlm, CONST_APTR challenge, ULONG challengeLength, APTR out, ULONG size, ULONG * length) (a0,a1,d0,a2,d1,a3)
+LONG GN_NTLMWrap(struct GNNTLM * ntlm, CONST_APTR in, ULONG inLength, APTR out, ULONG size, ULONG * length) (a0,a1,d0,a2,d1,a3)
+LONG GN_NTLMUnwrap(struct GNNTLM * ntlm, CONST_APTR in, ULONG inLength, APTR out, ULONG size, ULONG * length) (a0,a1,d0,a2,d1,a3)
+ULONG GN_NTLMGetAttr(struct GNNTLM * ntlm, ULONG attr) (a0,d0)
+struct GNCredSSP * GN_CredSSPNew(CONST struct GNCredSSPConfig * config, LONG * error) (a0,a1)
+VOID GN_CredSSPFree(struct GNCredSSP * credssp) (a0)
+LONG GN_CredSSPStep(struct GNCredSSP * credssp, CONST_APTR in, ULONG inLength, APTR out, ULONG size, ULONG * length) (a0,a1,d0,a2,d1,a3)
+ULONG GN_CredSSPGetAttr(struct GNCredSSP * credssp, ULONG attr) (a0,d0)
+LONG GN_Digest(ULONG algorithm, CONST_APTR data, ULONG length, APTR out) (d0,a0,d1,a1)
+LONG GN_HMAC(ULONG algorithm, CONST_APTR key, ULONG keyLength, CONST_APTR data, ULONG length, APTR out) (d0,a0,d1,a1,d2,a2)
+LONG GN_RC4(CONST_APTR key, ULONG keyLength, APTR data, ULONG length) (a0,d0,a1,d1)
+LONG GN_CredSSPMessageLength(CONST_APTR data, ULONG length) (a0,d0)
+==end

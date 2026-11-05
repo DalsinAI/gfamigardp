@@ -5,7 +5,8 @@
  * the rest are synthetic PDUs built from the public layouts (CLEAN-ROOM.md).
  *   cc -I../../src/core -I../../src/codec -o test_gfx test_gfx.c \
  *      ../../src/core/rdpgfx.c ../../src/codec/gfx_fb.c \
- *      ../../src/codec/zgfx.c ../../src/codec/planar.c ../../src/codec/progressive.c
+ *      ../../src/codec/zgfx.c ../../src/codec/planar.c ../../src/codec/progressive.c \
+ *      ../../src/codec/clearcodec.c
  * MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #include <stdio.h>

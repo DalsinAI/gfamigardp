@@ -1,0 +1,28 @@
+GFAmigaRDP — ClearCodec (Sacredtrees), 2026-11-05 Europe/London
+
+Continues from tip c555e22 / docs bdd71f5. Build plan §9.
+
+What works
+- ClearCodec decode ([MS-RDPEGFX] 2.2.4.1) into GFX surface + dirty rects:
+  residual RGB RLE, bands/V-Bars (max height 52), SHORT_VBAR miss/hit,
+  VBAR_CACHE_HIT, subcodec raw (0x00) and RLEX (0x02), glyph store/hit
+  (slots 0..3999), CACHE_RESET, seqNumber (resync on mismatch).
+- Wired on RDPGFX_WIRE_TO_SURFACE_PDU_1 codecId 0x0008.
+- Caps unchanged: still AVC_DISABLED on every 10.x set; ClearCodec needs
+  no extra flag (always part of GFX). Alpha / CAVIDEO / AVC still skipped.
+- GFX bitmap cache (SurfaceToCache / CacheToSurface) already present;
+  ClearCodec glyph + V-Bar / Short V-Bar tables heap-allocated (~416 KiB
+  empty pointer tables) so struct rdp_gfx stays ~6 KiB on 68040.
+
+Host tests
+- test_clearcodec: 55 passed (MS examples 4.1.1.1–4 residual/RLEX/V-Bar/
+  glyph, raw subcodec, WireToSurface1 path).
+- test_gfx: 56 passed; test_progressive: ok.
+
+Gaps
+- NSCodec subcodec (0x01) counted as nscodec_skip, pixels left unchanged.
+- Alpha codec not implemented.
+- No live Windows ClearCodec smoke (password not on CLI; ASKPASS skipped).
+- GNOME RD lab still Progressive-only so far; ClearCodec shows on Windows.
+
+Lab / stove filled after deploy.

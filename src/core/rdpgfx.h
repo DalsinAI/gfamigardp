@@ -8,7 +8,7 @@
  * H.264 is never offered: every RDPGFX 10.x capability set we send has
  * RDPGFX_CAPS_FLAG_AVC_DISABLED, 8.1 never has AVC420_ENABLED, and 10.1
  * (no flags field) is not sent. Codecs: Uncompressed, Planar and RemoteFX
- * Progressive; ClearCodec/Alpha/CAVIDEO are counted and skipped.
+ * Progressive and ClearCodec; Alpha/CAVIDEO/AVC are counted and skipped.
  * Plain C99. MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #ifndef RDP_RDPGFX_H
@@ -19,6 +19,7 @@
 #include "gfx_fb.h"
 #include "zgfx.h"
 #include "progressive.h"
+#include "clearcodec.h"
 
 #define RDPGFX_CHANNEL_NAME "Microsoft::Windows::RDS::Graphics"
 
@@ -111,8 +112,8 @@ struct rdp_gfx_stats
 {
 	uint32_t pdus, frames, bytes_in;
 	uint32_t solid_fills, s2s, s2c, c2s;
-	uint32_t uncompressed, planar;
-	uint32_t skipped_codec;       /* ClearCodec, Alpha, CAVIDEO, WireToSurface2 ... */
+	uint32_t uncompressed, planar, clearcodec;
+	uint32_t skipped_codec;       /* Alpha, CAVIDEO, unknown WireToSurface ... */
 	uint32_t avc_seen;            /* never offered, should stay 0 */
 	uint32_t errors;
 	uint16_t last_skipped_codec;
@@ -137,6 +138,7 @@ struct rdp_gfx
 	size_t cache_bytes;
 	struct rdp_gfx_surface surf[RDP_GFX_MAX_SURFACES];
 	struct rdp_gfx_cache_entry* cache;   /* RDP_GFX_CACHE_SLOTS, index = slot - 1 */
+	struct rdp_clearcodec clear;  /* ClearCodec glyph + V-Bar state */
 	struct rdp_gfx_stats st;
 	/* UI pan window in Graphics Output Buffer coordinates (exclusive x1/y1).
 	 * Progressive skips idwt/YCbCr outside it; rdp_gfx_paint_view fills gaps. */

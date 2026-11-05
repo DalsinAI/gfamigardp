@@ -8,6 +8,7 @@
 #include <string.h>
 #include "rdpgfx.h"
 #include "planar.h"
+#include "clearcodec.h"
 #include "stream.h"
 
 #define HDR 8
@@ -90,6 +91,12 @@ int rdp_gfx_init(struct rdp_gfx* g, const struct rdp_mem* mem, uint16_t w, uint1
 		return RDP_GFX_E_NOMEM;
 	}
 	memset(g->cache, 0, n);
+	rdp_clearcodec_init(&g->clear);
+	if (rdp_clearcodec_alloc(&g->clear, &g->mem) < 0)
+	{
+		rdp_gfx_free(g);
+		return RDP_GFX_E_NOMEM;
+	}
 	return 0;
 }
 
@@ -126,6 +133,7 @@ void rdp_gfx_free(struct rdp_gfx* g)
 	}
 	rdp_mem_free(&g->mem, g->scratch);
 	g->scratch = NULL;
+	rdp_clearcodec_free(&g->clear, &g->mem);
 	rdp_zgfx_free(&g->zgfx);
 	rdp_fb_free(&g->fb);
 }
@@ -352,6 +360,11 @@ static int wire_to_surface_1(struct rdp_gfx* g, struct rdp_stream* s)
 			return rc;
 		rc = rdp_planar_decode(data, len, w, h, dst, sf->w, g->scratch, 0);
 		g->st.planar++;
+		break;
+	case RDPGFX_CODECID_CLEARCODEC:
+		rc = rdp_clearcodec_decode(&g->clear, &g->mem, data, len, dst, sf->w, w, h);
+		if (rc >= 0)
+			g->st.clearcodec++;
 		break;
 	default:
 		g->st.skipped_codec++;

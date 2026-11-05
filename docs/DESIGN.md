@@ -120,7 +120,7 @@ The connection sequence (TCP, TLS, NLA, MCS, licensing) runs on its own CreateNe
   AllocVec(MEMF_ANY), so Fast RAM), decodes Uncompressed, Planar and
   RemoteFX Progressive (view-band clip skips idwt/YCbCr for off-screen
   tiles; pan paints them), and acknowledges each frame (queueDepth 1 so a
-  slow client eases the server); ClearCodec and Alpha are counted and
+  slow client eases the server); ClearCodec is decoded; Alpha is counted and
   skipped for now. With the flag off the channel is accepted and counted
   only. The UI takes the dirty rectangles with rdp_fb_take_dirty and
   blits them (WritePixelArray ARGB, pan offset applied). Later:

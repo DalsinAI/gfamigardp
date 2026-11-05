@@ -3,3 +3,9 @@ build-preview/
 *.o
 .build/
 lab-shots/
+
+# host test binaries
+tests/host/test_clearcodec
+tests/host/test_gfx
+tests/host/test_progressive
+tests/host/a.out

@@ -702,14 +702,15 @@ int session_window(struct app* app, struct session_info* info)
 		/* the Capabilities Exchange and the finalization on the connection
 		 * the connection window opened (review B1) go on in the loop below,
 		 * PDU by PDU as they come, so the window answers all the while
-		 * (review M2); they get ACTIVATE_US in all */
+		 * (review M2); they get ACTIVATE_US in all, and again after each
+		 * Deactivate All (rdp_act_deadline_passed, review 2 N1) */
 		uint64_t act_deadline = 0;
 		int blit_pending = 0;
 		if (s.conn)
 		{
 			status(&s, "Starting the session: waiting for Demand Active.");
 			olui_amiga_draw(s.asb);
-			act_deadline = amipr_monotonic_us() + ACTIVATE_US;
+			rdp_act_deadline_passed(s.conn->act, amipr_monotonic_us(), ACTIVATE_US, &act_deadline);
 		}
 		while (s.result < 0)
 		{
@@ -745,8 +746,8 @@ int session_window(struct app* app, struct session_info* info)
 				/* the desktop: what the frames changed, at most once a
 				 * frame; while more waits to be read it can wait too */
 				blit_pending = blit_dirty(&s, 0);
-				if (s.conn->live && s.conn->act != RDP_ACT_ACTIVE && s.conn->act != RDP_ACT_ENDED &&
-				    amipr_monotonic_us() >= act_deadline)
+				if (s.conn->live &&
+				    rdp_act_deadline_passed(s.conn->act, amipr_monotonic_us(), ACTIVATE_US, &act_deadline))
 				{
 					rdp_conn_close(s.conn);
 					status(&s, "The computer did not finish starting the session in time.");

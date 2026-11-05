@@ -3,7 +3,8 @@ GFAmigaRDP — UI pan + Progressive speed (Sacredtrees), 2026-11-05 Europe/Londo
 Pushed to DalsinAI/gfamigardp main (this pass continues from 7833793):
   91f04e2  UI: pan a remote desk bigger than the band; honour Colours (32-bit default)
   7833793  codec: speed Progressive on 68040; frame-ack queueDepth 1
-  (next)  view-tile skip + safer pan binding + idwt no final memcpy
+  10ce454  Progressive view-tile skip + safer pan for remote mouse
+  tip:     10ce45459f22fae1f837e2650e89ad3bc3a25e78
 
 UI
 - Pan: Alt/Ctrl + left-drag, or middle-drag (plain left-drag free for remote mouse).
@@ -32,4 +33,8 @@ Gaps
 - No fit-to-window scale yet.
 - Further 68k: RLGR asm, idwt asm, optional discard of far-off coefs under memory pressure.
 - No live RDP smoke this pass (password not on CLI; ASKPASS/Probe skipped).
-- Lab deploy SHA filled after stove/lab_put.
+Lab deploy (this pass)
+- stove os32-gcc16 job j20261105T134158-84fa91: exit 0
+- lab_put restart: SYS:C/GFAmigaRDP
+  sha256 77a829cf3f7a885e6adb24fd374fed30ff178de75afec1b9f3e9aea9cc53c82d
+- Previous binary archived under labs/gfamigardp-ui/archive/put-20261105T134339-3292/

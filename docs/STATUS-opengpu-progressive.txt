@@ -1,0 +1,109 @@
+Progressive decode through OpenGPU (2026-11-05, skeptic pass)
+=============================================================
+
+Supersedes the DWT_INV-only hook (d8ee7cd) and the I420 YUV pilot
+(ogpu_yuv.c, never bit-exact).
+
+What moved into OpenGPU (gfopenrtg stream v1.10, gfopengpu.library 0.27)
+- RLGR1 entropy decode + LL3 delta sum           OGPU_OP_RLGR_DEC  0x002A
+- dequantize + inverse 5/3 DWT (Y, Cb, Cr)       OGPU_OP_RFX_TILE  0x002B
+- YCbCr -> ARGB32 (16.16, [MS-RDPRFX] 3.1.8.2.5) OGPU_OP_RFX_YCBCR 0x002C
+- (DWT_INV 0x0029 stays for callers that only want the transform)
+
+What stays in GFAmigaRDP (src/codec/progressive.c)
+- WBT block / region / tile PDU parsing, quant tables, rectangles + view clip
+- tile state (coef, sign, bitpos), sub-band diffing, first-pass merge
+- SRL + raw upgrade passes (read/write per-coefficient sign state)
+- trim / paint after pan
+
+Hooks: struct rdp_prog_accel { rlgr, tile } (progressive.h), installed by
+src/amiga/ogpu_prog.c from session_win.c. Per tile: one Submit of 3 x
+RLGR_DEC (first/simple passes), one Submit of RFX_TILE + one RFX_YCBCR per
+clipped rectangle (32 per batch; more go in follow-on batches). A tile in
+the view whose stream rectangles are all clipped away is skipped in
+progressive.c (stats.empty_skip): no dequant / DWT / YCbCr, no hook call, so
+it never counts as accel_tiles (skeptic pass 2 nit).
+
+ONGPU gate (skeptic claim 1)
+- rdp_ogpu_prog_install only arms hooks when OGPU_Query answers with
+  OGPU_ONGPU set for RLGR_DEC / RFX_TILE + RFX_YCBCR.
+- The library's CPU core answers OGPU_FULL without OGPU_ONGPU_BIT, so a bare
+  68040 keeps progressive.c's own CPU kernels (same maths, no Submit
+  overhead). A real GPU driver (ACRTG.gpu / PiStorm.gpu) that claims ONGPU
+  takes the Submit path.
+- Also prevents a quiet host path if an ACRTG runtime is rebuilt with 0.27
+  and "answers as the core does" (FULL, no ONGPU).
+
+CPU fallback (after ONGPU install)
+- gfopengpu.library missing, or Query NONE / no ONGPU: accel not installed.
+- A Submit/Wait error other than OGPU_ERR_DATA: that hook returns 0 and the
+  step is redone on the CPU in-tree (stats.cpu_fallback counts it).
+- OGPU_ERR_DATA from RLGR_DEC = RDP_PROG_E_PROTO, as the CPU decoder says.
+  Kept for drivers, but the 0.27 core can't answer it for <= 4096 coefs:
+  RLGR reads zeros past the end and gives up only 64 bits past it, and the
+  zero runs finish a component within 62 bits (worst case: k = 0, kr = 10 at
+  the end; a search found exactly 62). rdp_rlgr1_decode has the same bound,
+  so a truncated component decodes (zero-padded) on both paths.
+
+Lab-only force (skeptic pass 2, claim 1 leftover)
+- SetEnv GFAmigaRDP/OGPUProgForce 1 (lab / debug only): rdp_ogpu_prog_install
+  also arms the hooks when Query answers FULL/PARTIAL without ONGPU, i.e. on
+  the library's CPU core, so a bare Cradle runs ogpu_prog.c's stream
+  building and address maths against the real core. Off unless the
+  variable is exactly "1". session_win.c writes "ogpu_prog=N" to
+  T:gfa-session (bit 0 RLGR, bit 1 TILE+YCBCR, bit 2 force on). Never for
+  user machines: Submit overhead, no speed-up.
+
+Bit-exactness / tests
+- gfopenrtg tests/test_rfx.c: ops vs progressive.c kernels (copied), random.
+- tools/test_prog_ogpu.sh (GFOPENRTG=checkout): whole synthetic frames
+  (simple / first / upgrade, both DWT layouts, clip + paint) decoded with
+  and without the accel: pixel-exact, stats equal (40 seeds).
+- Same host binary also covers (skeptic passes 1 + 2), all through the real
+  core, no short-cut returns in the stand-in:
+  * truncated RLGR (the 62-bits-past-the-end worst case, in each component):
+    core answers OGPU_OK, pixels equal to the CPU-only decode
+  * RLGR_DEC core error (OGPU_ERR_NOMAP, unmapped output) -> hook 0 ->
+    CPU RLGR, pixel-exact
+  * failed follow-on batch (>32 rects; core OGPU_ERR_NOMAP on the second
+    batch's first YCBCR, which leaves poisoned pixels in px as a driver
+    writing straight to the surface would) -> cpu_fallback, CPU redraws the
+    whole tile, pixels equal to a CPU-only decode (fails if the redo is
+    skipped: checked by mutation)
+  * tiles with more than 32 rectangles (batching, pixel-exact)
+  * all rects clipped away: empty_skip, hook not called, zero Submits
+- Stand-in SRC slots are 16 KB; copies are clamped (no 65535-into-16KB overrun).
+- The stand-in mirrors ogpu_prog.c's batching / ERR_DATA / nrects==0 control
+  flow; Amiga address maths (px + y * w + x, OGPU_XY) still need Cradle
+  exercise (stove build below).
+
+Behaviour change (small): first_pass decodes all three components before
+touching the tile, so a malformed component no longer leaves the tile
+half-merged. Decode scratch grows by 2 x 8 KB (vals x 3) + 8 B per rect.
+
+Naming: the OpenGPU hook is rlgr1 (three-component RLGR1). OGPU_RLGR_MODE3
+(RLGR3) remains UNSUPPORTED in the library.
+
+Not yet
+- ACRTG / PiStorm ONGPU for these ops (no driver claim yet).
+- No live Windows / GNOME RD pixel capture through the new path yet.
+- No 68040 timings of Submit-vs-in-tree (gated off until ONGPU).
+
+Pins: gfopensdk 007965a (main: squash of gfopensdk #44, gfopengpu 0.27 /
+stream.h v1.10 gathered from gfopenrtg main 5af78d8, squash of gfopenrtg #177).
+
+Amiga build (skeptic claim 1 / Amiga proof)
+- stove os32-gcc16 job j20261105T205953-beb8c2 at 48bd420: green.
+  GFAmigaRDP 434296 bytes, sha256 efecf13c6fdfec88aca1334eab8dfb731a77c8ff7880770c304c76e9eeacb86c
+  (ogpu_prog.c compiled into the binary; address maths still need a live
+  Cradle ONGPU session to exercise at run time — none claimed yet).
+- skeptic pass 2 tip e69bae6 (real-core failure tests, empty_skip, lab force):
+  stove os32-gcc16 job j20261105T211920-d0563d: green.
+  GFAmigaRDP 434456 bytes, sha256 764954d7a88a7241b267ba8bad14069467bfe944fe0437aabc52a3f149550753
+  Host: tools/test_prog_ogpu.sh 40 seeds pixel-exact + the five failure /
+  batch paths (GFOPENRTG=gfopenrtg 41f4a91, unchanged).
+- merged pin 7c6a0c8 (gfopensdk 007965a): stove os32-gcc16 job
+  j20261105T214247-d8ed56: green, GFAmigaRDP byte-identical (434456 bytes,
+  sha256 764954d7…); gfopenrtg main 5af78d8 library/opengpu job
+  j20261105T214248-23f56f: green, gfopengpu.library byte-identical (260604
+  bytes, sha256 b19c191d…). Lab gfamigardp-ui already carries both.

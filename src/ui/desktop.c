@@ -33,7 +33,7 @@
 /* cybergraphics.library by its vectors (interface facts from its
  * autodoc): WritePixelArray -126, GetCyberMapAttr -96 */
 static struct Library* CyberGfxBase;
-extern struct Library* OpenGPUBase; /* defined in ogpu_yuv.c */
+extern struct Library* OpenGPUBase; /* defined in ogpu_prog.c */
 #define CGX_WPA(src, sx, sy, mod, rp, dx, dy, w, h, fmt) \
 	LP10(0x7e, ULONG, WritePixelArray, APTR, (src), a0, UWORD, (sx), d0, UWORD, (sy), d1, UWORD, (mod), d2, \
 	     struct RastPort*, (rp), a1, UWORD, (dx), d3, UWORD, (dy), d4, UWORD, (w), d5, UWORD, (h), d6, \
@@ -58,7 +58,7 @@ extern struct Library* OpenGPUBase; /* defined in ogpu_yuv.c */
 
 static int s_ogpu_pixels; /* 1: PIXELS ok for ARGB32 target */
 static int s_ogpu_copy;   /* 1: COPY ok for ARGB32 target */
-static int s_ogpu_queried; /* 1: PIXELS/COPY Query done (base may be shared with YUV) */
+static int s_ogpu_queried; /* 1: PIXELS/COPY Query done (base shared with ogpu_prog.c) */
 
 static void ogpu_ensure(void)
 {
@@ -74,7 +74,7 @@ static void ogpu_ensure(void)
 	q = OGPU_Query(OGPU_OP_COPY, OGPU_FMT_ARGB32);
 	s_ogpu_copy = OGPU_ANSWER(q) != OGPU_NONE;
 	s_ogpu_queried = 1;
-	/* Keep the base even when blit Query fails: ogpu_yuv may still use YUV. */
+	/* Keep the base even when blit Query fails: ogpu_prog may still use the RFX ops. */
 }
 
 /* Map a CyberGraphX PIXFMT to an OGPU surface format; 0 if unsupported. */

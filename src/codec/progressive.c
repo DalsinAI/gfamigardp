@@ -7,21 +7,15 @@
 #include <string.h>
 #include "progressive.h"
 
-static rdp_prog_ycbcr_fn s_ycbcr_fn;
-static void* s_ycbcr_user;
-static rdp_prog_idwt_fn s_idwt_fn;
-static void* s_idwt_user;
+/* The compute back end (OpenGPU); zeroed: the CPU kernels below. */
+static struct rdp_prog_accel s_accel;
 
-void rdp_progressive_set_ycbcr(rdp_prog_ycbcr_fn fn, void* user)
+void rdp_progressive_set_accel(const struct rdp_prog_accel* a)
 {
-	s_ycbcr_fn = fn;
-	s_ycbcr_user = user;
-}
-
-void rdp_progressive_set_idwt(rdp_prog_idwt_fn fn, void* user)
-{
-	s_idwt_fn = fn;
-	s_idwt_user = user;
+	if (a)
+		s_accel = *a;
+	else
+		memset(&s_accel, 0, sizeof(s_accel));
 }
 
 
@@ -370,7 +364,6 @@ static void idwt2(const int32_t* LL, int las, const int32_t* HL, const int32_t* 
 
 /* buf: 4096 dequantized coefficients in band order; out: the 64 x 64
  * component written back into buf. tmp: RDP_PROG_TMP ints. */
-#define RDP_PROG_TMP (33 * 33 + 2 * 33 * 64 + 2 * 66 + 64 * 64)
 void rdp_prog_idwt(int32_t* buf, int re, int32_t* tmp)
 {
 	/* tmp layout: ll (33*33) | lp (33*64) | hp (33*64) | t (2*66) | mid (64*64).
@@ -421,7 +414,8 @@ struct ctx
 	const uint8_t* rects;      /* every TS_RFX_RECT of the stream, 8 bytes each */
 	int nrects;
 	struct rdp_prog_tile scratch;
-	int16_t* vals;             /* 4096 */
+	int16_t* vals;             /* 3 x 4096: one component each */
+	uint16_t* clipped;         /* nrects x 4: render()'s rectangles for the accel */
 	int32_t* work;             /* 4096 */
 	int32_t* tmp;              /* RDP_PROG_TMP */
 	int32_t* ycc;              /* 3 x 4096 */
@@ -494,7 +488,7 @@ static int tile_in_clip(const struct ctx* c, uint16_t xi, uint16_t yi)
  * tile lies outside the view clip (coefs stay; paint brings them back). */
 static void render(struct ctx* c, struct rdp_prog_tile* t, uint16_t xi, uint16_t yi)
 {
-	int comp, b, i, r;
+	int comp, b, i, r, n = 0;
 	int32_t tx = (int32_t)xi * 64, ty = (int32_t)yi * 64;
 	const int re = t->re ? 1 : 0;
 
@@ -503,35 +497,12 @@ static void render(struct ctx* c, struct rdp_prog_tile* t, uint16_t xi, uint16_t
 		c->st->view_skip++;
 		return;
 	}
-	band_init();
-	for (comp = 0; comp < 3; comp++)
-	{
-		const int16_t* co = t->coef + comp * RDP_PROG_COEFS;
-		int32_t* w = c->ycc + comp * RDP_PROG_COEFS;
-		for (b = 0; b < NBANDS; b++)
-		{
-			int sh = (int)t->quant[comp][b] - 6;
-			int off = s_band[re][b].off, n = (int)s_band[re][b].w * s_band[re][b].h;
-			if (sh >= 0)
-			{
-				int32_t m = 1 << sh;
-				for (i = off; i < off + n; i++)
-					w[i] = (int32_t)co[i] * m;
-			}
-			else
-			{
-				int rs = -sh;
-				for (i = off; i < off + n; i++)
-					w[i] = (int32_t)co[i] >> rs;
-			}
-		}
-		if (!(s_idwt_fn && s_idwt_fn(s_idwt_user, w, t->re, c->tmp)))
-			rdp_prog_idwt(w, t->re, c->tmp);
-	}
+	/* the stream's rectangles, clipped to the tile, the view and the surface */
 	for (r = 0; r < c->nrects; r++)
 	{
 		const uint8_t* q = c->rects + r * 8;
-		int32_t x0 = u16(q), y0 = u16(q + 2), x1 = x0 + u16(q + 4), y1 = y0 + u16(q + 6), y;
+		int32_t x0 = u16(q), y0 = u16(q + 2), x1 = x0 + u16(q + 4), y1 = y0 + u16(q + 6);
+		uint16_t* o = c->clipped + n * 4;
 		if (x0 < tx) x0 = tx;
 		if (y0 < ty) y0 = ty;
 		if (x1 > tx + 64) x1 = tx + 64;
@@ -547,40 +518,88 @@ static void render(struct ctx* c, struct rdp_prog_tile* t, uint16_t xi, uint16_t
 		if (y1 > c->h) y1 = c->h;
 		if (x0 >= x1 || y0 >= y1)
 			continue;
-		if (s_ycbcr_fn &&
-		    s_ycbcr_fn(s_ycbcr_user, c->px, c->w, c->h,
-		               c->ycc, c->ycc + RDP_PROG_COEFS, c->ycc + 2 * RDP_PROG_COEFS,
-		               (int)tx, (int)ty, (int)x0, (int)y0, (int)x1, (int)y1))
+		o[0] = (uint16_t)x0; o[1] = (uint16_t)y0; o[2] = (uint16_t)x1; o[3] = (uint16_t)y1;
+		n++;
+	}
+	/* Nothing of the tile to paint (every stream rect clipped away): skip
+	 * the dequant / DWT / YCbCr (coefs stay) and don't ask the accel. */
+	if (n == 0)
+	{
+		c->st->empty_skip++;
+		goto done;
+	}
+	/* OpenGPU: dequantize, DWT and YCbCr of the whole tile in one batch */
+	if (s_accel.tile)
+	{
+		if (s_accel.tile(s_accel.user, t->coef, (const uint8_t(*)[10])t->quant, re, c->ycc, c->tmp,
+		                 c->px, c->w, (int)tx, (int)ty, c->clipped, n))
 		{
-			c->st->yuv_gpu++;
+			c->st->accel_tiles++;
+			goto done;
 		}
-		else
+		c->st->cpu_fallback++;
+	}
+	band_init();
+	for (comp = 0; comp < 3; comp++)
+	{
+		const int16_t* co = t->coef + comp * RDP_PROG_COEFS;
+		int32_t* w = c->ycc + comp * RDP_PROG_COEFS;
+		for (b = 0; b < NBANDS; b++)
 		{
-			/* [MS-RDPRFX] 3.1.8.2.5: Y + 128; matrix in 16.16. Hot path for 68040. */
-			for (y = y0; y < y1; y++)
+			int sh = (int)t->quant[comp][b] - 6;
+			int off = s_band[re][b].off, nb = (int)s_band[re][b].w * s_band[re][b].h;
+			if (sh >= 0)
 			{
-				uint32_t* dst = c->px + (size_t)y * c->w + (size_t)x0;
-				const int32_t* Y = c->ycc + (y - ty) * 64 + (x0 - tx);
-				const int32_t* Cb = Y + RDP_PROG_COEFS;
-				const int32_t* Cr = Cb + RDP_PROG_COEFS;
-				int n = (int)(x1 - x0), i;
-				for (i = 0; i < n; i++)
-				{
-					int32_t yy = Y[i] + 128, cb = Cb[i], cr = Cr[i];
-					int32_t R = yy + ((cr * 91916 + 32768) >> 16);
-					int32_t G = yy - ((cb * 22527 + cr * 46819 + 32768) >> 16);
-					int32_t B = yy + ((cb * 115993 + 32768) >> 16);
-					uint32_t r = (uint32_t)R, g = (uint32_t)G, b = (uint32_t)B;
-					if (r > 255u) r = (uint32_t)(R < 0 ? 0 : 255);
-					if (g > 255u) g = (uint32_t)(G < 0 ? 0 : 255);
-					if (b > 255u) b = (uint32_t)(B < 0 ? 0 : 255);
-					dst[i] = 0xFF000000u | (r << 16) | (g << 8) | b;
-				}
+				int32_t m = 1 << sh;
+				for (i = off; i < off + nb; i++)
+					w[i] = (int32_t)co[i] * m;
+			}
+			else
+			{
+				int rs = -sh;
+				for (i = off; i < off + nb; i++)
+					w[i] = (int32_t)co[i] >> rs;
 			}
 		}
-		if (c->on_rect)
-			c->on_rect(c->user, (uint16_t)x0, (uint16_t)y0, (uint16_t)x1, (uint16_t)y1);
+		rdp_prog_idwt(w, re, c->tmp);
 	}
+	for (r = 0; r < n; r++)
+	{
+		const uint16_t* q = c->clipped + r * 4;
+		int32_t x0 = q[0], y0 = q[1], x1 = q[2], y1 = q[3], y;
+		/* [MS-RDPRFX] 3.1.8.2.5: Y + 128; matrix in 16.16. Hot path for 68040.
+		 * The products wrap in 32 bits (unsigned), as the 68040's muls.l
+		 * does, so a garbage tile is defined C and matches OpenGPU's
+		 * RFX_YCBCR bit for bit. */
+		for (y = y0; y < y1; y++)
+		{
+			uint32_t* dst = c->px + (size_t)y * c->w + (size_t)x0;
+			const int32_t* Y = c->ycc + (y - ty) * 64 + (x0 - tx);
+			const int32_t* Cb = Y + RDP_PROG_COEFS;
+			const int32_t* Cr = Cb + RDP_PROG_COEFS;
+			int nx = (int)(x1 - x0), k;
+			for (k = 0; k < nx; k++)
+			{
+				int32_t yy = Y[k] + 128;
+				uint32_t cb = (uint32_t)Cb[k], cr = (uint32_t)Cr[k];
+				int32_t R = yy + ((int32_t)(cr * 91916u + 32768u) >> 16);
+				int32_t G = yy - ((int32_t)(cb * 22527u + cr * 46819u + 32768u) >> 16);
+				int32_t B = yy + ((int32_t)(cb * 115993u + 32768u) >> 16);
+				uint32_t rr = (uint32_t)R, g = (uint32_t)G, bb = (uint32_t)B;
+				if (rr > 255u) rr = (uint32_t)(R < 0 ? 0 : 255);
+				if (g > 255u) g = (uint32_t)(G < 0 ? 0 : 255);
+				if (bb > 255u) bb = (uint32_t)(B < 0 ? 0 : 255);
+				dst[k] = 0xFF000000u | (rr << 16) | (g << 8) | bb;
+			}
+		}
+	}
+done:
+	if (c->on_rect)
+		for (r = 0; r < n; r++)
+		{
+			const uint16_t* q = c->clipped + r * 4;
+			c->on_rect(c->user, q[0], q[1], q[2], q[3]);
+		}
 	t->painted = 1;
 }
 
@@ -628,6 +647,36 @@ static int first_pass(struct ctx* c, const struct region* rg, const uint8_t* p, 
 		}
 		t = &c->scratch;   /* a full, final, original tile needs no state */
 	}
+	/* RLGR1 of the three components (and LL3's deltas, summed even for a
+	 * difference tile, 3.3.8.2.1.1): OpenGPU in one batch, else here. Done
+	 * before the tile changes, so a malformed component leaves it as it was. */
+	{
+		const uint8_t* src[3];
+		int got = 0;
+		src[0] = p + hdr;
+		src[1] = src[0] + clen[0];
+		src[2] = src[1] + clen[1];
+		if (s_accel.rlgr)
+		{
+			got = s_accel.rlgr(s_accel.user, src, clen, rg->re, c->vals);
+			if (got < 0)
+				return RDP_PROG_E_PROTO;
+			if (got)
+				c->st->accel_rlgr++;
+			else
+				c->st->cpu_fallback++;
+		}
+		if (!got)
+			for (comp = 0; comp < 3; comp++)
+			{
+				int16_t* v = c->vals + comp * RDP_PROG_COEFS;
+				if (rdp_rlgr1_decode(src[comp], clen[comp], v, RDP_PROG_COEFS) < 0)
+					return RDP_PROG_E_PROTO;
+				rdp_prog_band_layout(rg->re, B_LL3, &off, &bw, &bh);
+				for (i = off + 1; i < off + bw * bh; i++)
+					v[i] = (int16_t)(v[i] + v[i - 1]);
+			}
+	}
 	t->painted = 0;
 	t->re = (uint8_t)rg->re;
 	pos = hdr;
@@ -635,26 +684,21 @@ static int first_pass(struct ctx* c, const struct region* rg, const uint8_t* p, 
 	{
 		int16_t* co = t->coef + comp * RDP_PROG_COEFS;
 		int8_t* sg = t->sign ? t->sign + comp * RDP_PROG_COEFS : NULL;
+		const int16_t* vals = c->vals + comp * RDP_PROG_COEFS;
 		uint8_t bp[NBANDS];
-		if (rdp_rlgr1_decode(p + pos, clen[comp], c->vals, RDP_PROG_COEFS) < 0)
-			return RDP_PROG_E_PROTO;
 		pos += clen[comp];
 		unpack_quant(rg->quant + qi[comp] * 5, t->quant[comp]);
 		if (progressive)
 			unpack_quant(rg->prog + quality * 16 + 1 + comp * 5, bp);
 		else
 			memset(bp, 0, sizeof(bp));
-		/* LL3 deltas, summed even for a difference tile (3.3.8.2.1.1) */
-		rdp_prog_band_layout(rg->re, B_LL3, &off, &bw, &bh);
-		for (i = off + 1; i < off + bw * bh; i++)
-			c->vals[i] = (int16_t)(c->vals[i] + c->vals[i - 1]);
 		for (b = 0; b < NBANDS; b++)
 		{
 			int32_t m = 1 << bp[b];
 			rdp_prog_band_layout(rg->re, b, &off, &bw, &bh);
 			for (i = off; i < off + bw * bh; i++)
 			{
-				int32_t v = c->vals[i];
+				int32_t v = vals[i];
 				co[i] = (int16_t)(diff ? co[i] + v * m : v * m);
 				if (sg)
 					sg[i] = (int8_t)(b == B_LL3 ? 0 : v > 0 ? 1 : v < 0 ? -1 : 0);
@@ -821,8 +865,9 @@ int rdp_progressive_decode(struct rdp_prog_surface* ps, const struct rdp_mem* me
 			nr += u16(data + pos + 7);
 		pos += u16(data + pos) == WBT_FRAME_BEGIN ? 12 : bl;
 	}
-	bytes = nr * 8 + 2 * RDP_PROG_COEFS * sizeof(int16_t) + 3 * RDP_PROG_COEFS * sizeof(int16_t) +
-	        RDP_PROG_COEFS * sizeof(int32_t) + RDP_PROG_TMP * sizeof(int32_t) + 3 * RDP_PROG_COEFS * sizeof(int32_t);
+	/* rects (nr x 8) | clipped (nr x 8) | work | tmp | ycc (3) | vals (3) | scratch coef (3) */
+	bytes = nr * 16 + 4 + RDP_PROG_COEFS * sizeof(int32_t) + RDP_PROG_TMP * sizeof(int32_t) +
+	        3 * RDP_PROG_COEFS * sizeof(int32_t) + 6 * RDP_PROG_COEFS * sizeof(int16_t);
 	if (!(rects = (uint8_t*)rdp_mem_alloc(mem, bytes)))
 		return RDP_PROG_E_NOMEM;
 	c.ps = ps;
@@ -835,11 +880,12 @@ int rdp_progressive_decode(struct rdp_prog_surface* ps, const struct rdp_mem* me
 	c.st = st;
 	c.diffing = ps->diffing;
 	c.rects = rects;
-	c.work = (int32_t*)(void*)(rects + ((nr * 8 + 3) & ~(size_t)3));
+	c.clipped = (uint16_t*)(void*)(rects + nr * 8);
+	c.work = (int32_t*)(void*)(rects + ((nr * 16 + 3) & ~(size_t)3));
 	c.tmp = c.work + RDP_PROG_COEFS;
 	c.ycc = c.tmp + RDP_PROG_TMP;
 	c.vals = (int16_t*)(void*)(c.ycc + 3 * RDP_PROG_COEFS);
-	c.scratch.coef = c.vals + RDP_PROG_COEFS;
+	c.scratch.coef = c.vals + 3 * RDP_PROG_COEFS;
 	for (pos = 0; pos + 6 <= len;)
 	{
 		uint32_t bl = u32(data + pos + 2);
@@ -888,6 +934,7 @@ int rdp_progressive_paint(struct rdp_prog_surface* ps, const struct rdp_mem* mem
 	struct ctx c;
 	struct rdp_prog_stats dummy;
 	uint8_t rect[8];
+	uint16_t clipped[4];
 	size_t bytes;
 	uint8_t* buf;
 	uint16_t xi0, yi0, xi1, yi1, xi, yi;
@@ -930,6 +977,7 @@ int rdp_progressive_paint(struct rdp_prog_surface* ps, const struct rdp_mem* mem
 	}
 	c.rects = rect;
 	c.nrects = 1;
+	c.clipped = clipped;
 	xi0 = (uint16_t)(x0 / 64);
 	yi0 = (uint16_t)(y0 / 64);
 	xi1 = (uint16_t)((x1 + 63) / 64);

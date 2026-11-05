@@ -16,7 +16,7 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 mkdir -p "$DEPS"
 
 # name pin
-PINS='gfopensdk b4ccc885c9af372dbbb69b574fdc31c6c4044ea3
+PINS='gfopensdk 007965a7905803c73f1caeae199badbd8f4c1b95
 gfopentls aa6f6a5a34a0558351ece25f29066f51a4e85499
 gfopenlayout da4a066ee2fe4a7ca93d4175c44f38a5b9ac80e6
 amicradle-guest 27832e77a4590810b40e57b3c182abb4e7fa366c

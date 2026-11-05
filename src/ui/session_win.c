@@ -148,6 +148,20 @@ static void show_mode(struct sw* s)
 	olui_set_text(s->sb, olui_find(s->sb, "mode"), line);
 }
 
+
+/* Lab-only markers on T: so GUI Critical verify can be read without OCR. */
+static void lab_mark(const char* text)
+{
+	BPTR fh = Open((CONST_STRPTR)"T:gfa-session", MODE_READWRITE);
+	if (!fh)
+		fh = Open((CONST_STRPTR)"T:gfa-session", MODE_NEWFILE);
+	if (!fh)
+		return;
+	Seek(fh, 0, OFFSET_END);
+	Write(fh, (APTR)text, (LONG)strlen(text));
+	Close(fh);
+}
+
 /* the session's state in words, on the status line */
 static void show_session(struct sw* s, int rc)
 {
@@ -193,6 +207,15 @@ static void show_session(struct sw* s, int rc)
 		snprintf(line, sizeof(line), "Starting the session: %s.", rdp_act_name(c->act));
 	status(s, line);
 	show_mode(s);
+	if (c->act == RDP_ACT_ACTIVE)
+	{
+		char mark[80];
+		snprintf(mark, sizeof(mark), "active frames=%lu pdus=%lu\n",
+		         (unsigned long)(c->gfx ? c->gfx->st.frames : 0), (unsigned long)c->pdus);
+		lab_mark(mark);
+	}
+	else if (c->act == RDP_ACT_ENDED || (rc < 0 && rc != AMIPR_ETIMEOUT))
+		lab_mark("ended\n");
 }
 
 
@@ -262,6 +285,7 @@ static void harvest_cookie(struct sw* s)
 /* User Disconnect/Quit: wipe cookie, close, set result. */
 static void end_session(struct sw* s, int result, int user_disc)
 {
+	lab_mark(user_disc ? "user_disc\n" : "end_session\n");
 	s->user_disc = user_disc;
 	if (user_disc && s->info)
 	{
@@ -690,6 +714,7 @@ int session_window(struct app* app, struct session_info* info)
 		show_mode(&s);
 		status(&s, info->demo ? "Demo: keys/mouse stay local. Alt/Ctrl or middle-drag pans; Amiga-H homes." :
 		                        "Connected. Keys and mouse go to the computer; Alt/Ctrl or middle-drag pans.");
+		lab_mark("connected\n");
 		/* both strips need library 11; the static libolui always has them */
 		/* the strips first: olui_amiga_layout draws all it has, the whole window
 		 * when it has no strip yet (and the status bar's row went to the top) */

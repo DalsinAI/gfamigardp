@@ -1,0 +1,34 @@
+GFAmigaRDP — fullscreen / resize / auto-reconnect (Sacredtrees), 2026-11-05 Europe/London
+
+Continues from tip 9527722 / docs a4c59cf. Build plan polish.
+
+What works
+- Full screen toggle (toolbar + Amiga-F): Opens a custom screen via BestModeID
+  of the remote desktop size; borderless window with toolbar/status. Toggle
+  returns to the Workbench public screen. Pan stays; no forced scale on 68040.
+- Auto-reconnect cookie (MS-RDPBCGR 1.3.1.5 / 2.2.4.2 / 2.2.4.3 / 5.5):
+  Save Session Info INFOTYPE_LOGON_EXTENDED_INFO → ARC_SC stored in memory.
+  Client Info sends ARC_CS (HMAC-MD5 verifier; Enhanced Security = 32 zero
+  client random). Password is never kept for reconnect (DESIGN).
+  On unexpected drop with a cookie, session returns to connect_window which
+  reconnects TLS-only with the cookie (no CredSSP password).
+- General caps advertise AUTORECONNECT_SUPPORTED.
+- Cancel / Disconnect: user Disconnect/Quit/close wipe the cookie and send
+  the Disconnect Provider Ultimatum; Cancel on the connect window still
+  stops the connection task. Cookie reconnect failures clear want_reconnect.
+- Local resize: pan + Progressive view sync; strips re-asserted on NEWSIZE.
+  Server Deactivate All → Demand Active shows "re-exchanging capabilities".
+
+Host tests
+- test_arc: RFC 2202 HMAC-MD5 cases + Save Session Info cookie parse/build.
+
+Gaps
+- Display Control DVC ([MS-RDPEDISP]) not implemented: local window size does
+  not ask the server to resize; pan only (by design for 68040).
+- Cookie reconnect forces PROTOCOL_SSL (TLS). Servers that insist on NLA for
+  every connection need the password again (we never store it).
+- Full screen ModeID may fall back if BestModeID fails for the exact size.
+- No live auto-reconnect smoke (password not on CLI).
+- Certificate trust UI / favourites polish still phase 6 leftovers.
+
+Lab / stove filled after deploy.

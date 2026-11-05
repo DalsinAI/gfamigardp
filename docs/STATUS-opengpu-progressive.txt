@@ -69,4 +69,7 @@ Pins: gfopensdk 5da85f0 (stream.h v1.10 skeptic notes, branch team6/stream-v1.10
 Re-pin after the SDK PR merges if it is squashed.
 
 Amiga build (skeptic claim 1 / Amiga proof)
-- stove os32-gcc16: see PR / ship notes for job ids, sizes, sha256.
+- stove os32-gcc16 job j20261105T205953-beb8c2 at 48bd420: green.
+  GFAmigaRDP 434296 bytes, sha256 efecf13c6fdfec88aca1334eab8dfb731a77c8ff7880770c304c76e9eeacb86c
+  (ogpu_prog.c compiled into the binary; address maths still need a live
+  Cradle ONGPU session to exercise at run time — none claimed yet).

@@ -19,8 +19,10 @@ What stays in GFAmigaRDP (src/codec/progressive.c)
 Hooks: struct rdp_prog_accel { rlgr, tile } (progressive.h), installed by
 src/amiga/ogpu_prog.c from session_win.c. Per tile: one Submit of 3 x
 RLGR_DEC (first/simple passes), one Submit of RFX_TILE + one RFX_YCBCR per
-clipped rectangle (32 per batch; more go in follow-on batches). All
-rectangles clipped away: skip RFX_TILE / YCBCR (no paint work).
+clipped rectangle (32 per batch; more go in follow-on batches). A tile in
+the view whose stream rectangles are all clipped away is skipped in
+progressive.c (stats.empty_skip): no dequant / DWT / YCbCr, no hook call, so
+it never counts as accel_tiles (skeptic pass 2 nit).
 
 ONGPU gate (skeptic claim 1)
 - rdp_ogpu_prog_install only arms hooks when OGPU_Query answers with
@@ -37,17 +39,39 @@ CPU fallback (after ONGPU install)
 - A Submit/Wait error other than OGPU_ERR_DATA: that hook returns 0 and the
   step is redone on the CPU in-tree (stats.cpu_fallback counts it).
 - OGPU_ERR_DATA from RLGR_DEC = RDP_PROG_E_PROTO, as the CPU decoder says.
+  Kept for drivers, but the 0.27 core can't answer it for <= 4096 coefs:
+  RLGR reads zeros past the end and gives up only 64 bits past it, and the
+  zero runs finish a component within 62 bits (worst case: k = 0, kr = 10 at
+  the end; a search found exactly 62). rdp_rlgr1_decode has the same bound,
+  so a truncated component decodes (zero-padded) on both paths.
+
+Lab-only force (skeptic pass 2, claim 1 leftover)
+- SetEnv GFAmigaRDP/OGPUProgForce 1 (lab / debug only): rdp_ogpu_prog_install
+  also arms the hooks when Query answers FULL/PARTIAL without ONGPU, i.e. on
+  the library's CPU core, so a bare Cradle runs ogpu_prog.c's stream
+  building and address maths against the real core. Off unless the
+  variable is exactly "1". session_win.c writes "ogpu_prog=N" to
+  T:gfa-session (bit 0 RLGR, bit 1 TILE+YCBCR, bit 2 force on). Never for
+  user machines: Submit overhead, no speed-up.
 
 Bit-exactness / tests
 - gfopenrtg tests/test_rfx.c: ops vs progressive.c kernels (copied), random.
 - tools/test_prog_ogpu.sh (GFOPENRTG=checkout): whole synthetic frames
   (simple / first / upgrade, both DWT layouts, clip + paint) decoded with
   and without the accel: pixel-exact, stats equal (40 seeds).
-- Same host binary also covers (skeptic claim 1 leftovers):
-  * OGPU_ERR_DATA -> RDP_PROG_E_PROTO (no cpu_fallback on that step)
-  * failed follow-on batch (>32 rects) -> cpu_fallback, whole tile on CPU
+- Same host binary also covers (skeptic passes 1 + 2), all through the real
+  core, no short-cut returns in the stand-in:
+  * truncated RLGR (the 62-bits-past-the-end worst case, in each component):
+    core answers OGPU_OK, pixels equal to the CPU-only decode
+  * RLGR_DEC core error (OGPU_ERR_NOMAP, unmapped output) -> hook 0 ->
+    CPU RLGR, pixel-exact
+  * failed follow-on batch (>32 rects; core OGPU_ERR_NOMAP on the second
+    batch's first YCBCR, which leaves poisoned pixels in px as a driver
+    writing straight to the surface would) -> cpu_fallback, CPU redraws the
+    whole tile, pixels equal to a CPU-only decode (fails if the redo is
+    skipped: checked by mutation)
   * tiles with more than 32 rectangles (batching, pixel-exact)
-  * all rects clipped away: tile hook returns 1 with zero Submits
+  * all rects clipped away: empty_skip, hook not called, zero Submits
 - Stand-in SRC slots are 16 KB; copies are clamped (no 65535-into-16KB overrun).
 - The stand-in mirrors ogpu_prog.c's batching / ERR_DATA / nrects==0 control
   flow; Amiga address maths (px + y * w + x, OGPU_XY) still need Cradle

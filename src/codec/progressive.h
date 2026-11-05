@@ -54,6 +54,8 @@ struct rdp_prog_stats
 	uint32_t accel_tiles;          /* tiles dequantized + DWT + YCbCr by the accel (OpenGPU) */
 	uint32_t accel_rlgr;           /* tiles whose RLGR1 the accel decoded */
 	uint32_t cpu_fallback;         /* hook calls that said 0 (the CPU did it) */
+	uint32_t empty_skip;           /* tile in the view but every stream rect clipped
+	                                * away: no dequant/DWT/YCbCr, no accel call */
 };
 
 /* Exclusive surface clip for decode/paint; NULL or zero-size = whole surface. */
@@ -91,7 +93,9 @@ void rdp_progressive_free(struct rdp_prog_surface* ps, const struct rdp_mem* mem
  *   (3 x 4096, Y Cb Cr; tmp: RDP_PROG_TMP ints of scratch) and write the
  *   nrects rectangles (x0, y0, x1, y1 exclusive, surface coordinates, already
  *   clipped to the tile, the view and the surface) into px (w wide). The
- *   tile's origin is (tx, ty). 1 done, 0 not taken (the CPU renders all). */
+ *   tile's origin is (tx, ty), nrects >= 1 (a tile with nothing to paint is
+ *   counted in empty_skip and never reaches the hook). 1 done, 0 not taken
+ *   (the CPU renders all). */
 struct rdp_prog_accel
 {
 	int (*rlgr)(void* user, const uint8_t* const src[3], const uint16_t len[3], int re, int16_t* out);

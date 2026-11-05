@@ -725,6 +725,12 @@ int session_window(struct app* app, struct session_info* info)
 	if (ok)
 	{
 		rdp_ogpu_prog_install();
+		{
+			/* lab: which Progressive ops took the OpenGPU path (bit 2: OGPUProgForce) */
+			char mark[32];
+			snprintf(mark, sizeof(mark), "ogpu_prog=%d\n", rdp_ogpu_prog_ready());
+			lab_mark(mark);
+		}
 		draw_desktop(&s);
 		/* the Capabilities Exchange and the finalization on the connection
 		 * the connection window opened (review B1) go on in the loop below,

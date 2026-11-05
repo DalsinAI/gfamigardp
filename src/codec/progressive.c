@@ -521,6 +521,13 @@ static void render(struct ctx* c, struct rdp_prog_tile* t, uint16_t xi, uint16_t
 		o[0] = (uint16_t)x0; o[1] = (uint16_t)y0; o[2] = (uint16_t)x1; o[3] = (uint16_t)y1;
 		n++;
 	}
+	/* Nothing of the tile to paint (every stream rect clipped away): skip
+	 * the dequant / DWT / YCbCr (coefs stay) and don't ask the accel. */
+	if (n == 0)
+	{
+		c->st->empty_skip++;
+		goto done;
+	}
 	/* OpenGPU: dequantize, DWT and YCbCr of the whole tile in one batch */
 	if (s_accel.tile)
 	{

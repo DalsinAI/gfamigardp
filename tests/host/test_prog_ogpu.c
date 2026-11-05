@@ -6,9 +6,13 @@
  * whose buffers are big-endian, as on the Amiga.
  *
  * The stand-in matches ogpu_prog.c's control flow: TILE_RECTS=32 batches,
- * surface-stride YCBCR writes, nrects==0 skips RFX_TILE, OGPU_ERR_DATA from
- * RLGR maps to RDP_PROG_E_PROTO, and a failed follow-on batch returns 0 so
- * progressive.c redraws the whole tile on the CPU (cpu_fallback).
+ * surface-stride YCBCR writes, OGPU_ERR_DATA from the core's RLGR_DEC maps to
+ * RDP_PROG_E_PROTO, and a failed follow-on batch returns 0 so progressive.c
+ * redraws the whole tile on the CPU (cpu_fallback). Failures come from the
+ * real core (unmapped RLGR_DEC / YCBCR destinations: OGPU_ERR_NOMAP), never
+ * a short-cut return; truncated RLGR goes through the core too (it answers
+ * OK: zeros past the end, see test_rlgr_truncated). A tile whose rects
+ * are all clipped away never reaches the hook (stats.empty_skip).
  *   cc -std=c99 -Isrc/codec -I$GFOPENRTG/include -I$GFOPENRTG/library/opengpu \
  *      tests/host/test_prog_ogpu.c src/codec/progressive.c src/codec/gfx_fb.c \
  *      $GFOPENRTG/library/opengpu/ogpu_core.c $GFOPENRTG/library/opengpu/ogpu_dwt.c \
@@ -57,9 +61,12 @@ static int core_run(unsigned char* s, long words)
 }
 
 static int calls_rlgr, calls_tile;
-static int inject_rlgr_err_data;     /* next RLGR Submit reports OGPU_ERR_DATA */
-static int inject_tile_fail_after;   /* fail the Nth tile Submit (1-based); 0 = off */
+static int last_rlgr_core;           /* the core's answer to the last RLGR_DEC batch */
+static int inject_tile_fail_after;   /* Nth tile Submit (1-based) gets an unmapped YCBCR; 0 = off */
 static int tile_submits;
+static int tile_core_fails;          /* tile batches the core failed */
+static long garbage_px;              /* poisoned canvas pixels copied to the surface */
+#define POISON 0xA5A5A5A5u
 
 static int shim_rlgr(void* user, const uint8_t* const src[3], const uint16_t len[3], int re, int16_t* out)
 {
@@ -68,11 +75,6 @@ static int shim_rlgr(void* user, const uint8_t* const src[3], const uint16_t len
 	int c, i, r;
 	(void)user;
 	calls_rlgr++;
-	if (inject_rlgr_err_data)
-	{
-		inject_rlgr_err_data = 0;
-		return RDP_PROG_E_PROTO;   /* ogpu_prog.c: OGPU_ERR_DATA -> RDP_PROG_E_PROTO */
-	}
 	ogpu_batch_init(&B, sb, sizeof sb / 4);
 	for (c = 0; c < 3; c++)
 	{
@@ -86,8 +88,9 @@ static int shim_rlgr(void* user, const uint8_t* const src[3], const uint16_t len
 		              OGPU_RLGR_LL3_DELTA | (re ? OGPU_RFX_RE : 0));
 	}
 	r = core_run(sb, B.words);
+	last_rlgr_core = r;
 	if (r == OGPU_ERR_DATA)
-		return RDP_PROG_E_PROTO;
+		return RDP_PROG_E_PROTO;   /* ogpu_prog.c: r == OGPU_ERR_DATA -> RDP_PROG_E_PROTO */
 	if (r != OGPU_OK)
 		return 0;
 	for (i = 0; i < 3 * 4096; i++)
@@ -96,7 +99,10 @@ static int shim_rlgr(void* user, const uint8_t* const src[3], const uint16_t len
 }
 
 /* Mirrors ogpu_prog.c tile(): RFX_TILE once, then YCBCR in batches of 32,
- * writing straight into the caller's surface (stride = sw pixels). */
+ * writing straight into the caller's surface (stride = sw pixels). The
+ * canvas is poisoned before each batch and copied out whatever the core
+ * answers, so a failed batch leaves partial / garbage writes in px, as a
+ * driver writing straight to the surface would. */
 static int shim_tile(void* user, const int16_t* coef, const uint8_t quant[3][10], int re,
                      int32_t* ycc, int32_t* tmp, uint32_t* px, uint16_t sw, int tx, int ty,
                      const uint16_t* rects, int nrects)
@@ -108,7 +114,7 @@ static int shim_tile(void* user, const int16_t* coef, const uint8_t quant[3][10]
 	(void)user; (void)ycc; (void)tmp;
 	calls_tile++;
 	if (nrects <= 0)
-		return 1;   /* ogpu_prog.c: all rects clipped — no Submit */
+		return 0;   /* ogpu_prog.c: never called so; "not taken" */
 	for (i = 0; i < 3 * 4096; i++)
 	{
 		arena[COEF_A + i * 2] = (ogpu_u8)((uint16_t)coef[i] >> 8);
@@ -119,7 +125,9 @@ static int shim_tile(void* user, const int16_t* coef, const uint8_t quant[3][10]
 	 * then copy out with surface stride (Amiga writes straight to px). */
 	do
 	{
-		int batch = 0;
+		int batch = 0, r;
+		for (i = 0; i < 64 * 64 * 4; i++)
+			arena[canvas + i] = (ogpu_u8)(POISON & 255);
 		ogpu_batch_init(&B, sb, sizeof sb / 4);
 		if (done == 0)
 			ogpu_rfx_tile(&B, COEF_A, QUANT_A, re ? OGPU_RFX_RE : 0, YCC_A, WORK_A, OGPU_RFX_TILE_WORK_BYTES);
@@ -127,14 +135,16 @@ static int shim_tile(void* user, const int16_t* coef, const uint8_t quant[3][10]
 		{
 			const uint16_t* q = rects + (done + k) * 4;
 			int x0 = q[0] - tx, y0 = q[1] - ty, rw = q[2] - q[0], rh = q[3] - q[1];
-			ogpu_rfx_ycbcr(&B, YCC_A, x0, y0, rw, rh, canvas + (unsigned long)(y0 * 64 + x0) * 4, 256);
+			unsigned long out = canvas + (unsigned long)(y0 * 64 + x0) * 4;
+			/* the failing batch's first YCBCR points outside the arena: the
+			 * core answers OGPU_ERR_NOMAP after running the rest */
+			if (k == 0 && inject_tile_fail_after && tile_submits + 1 == inject_tile_fail_after)
+				out = 0xFFFFFF00UL;
+			ogpu_rfx_ycbcr(&B, YCC_A, x0, y0, rw, rh, out, 256);
 			batch++;
 		}
 		tile_submits++;
-		if (inject_tile_fail_after && tile_submits == inject_tile_fail_after)
-			return 0;   /* follow-on (or first) batch failed: whole tile on CPU */
-		if (core_run(sb, B.words) != OGPU_OK)
-			return 0;
+		r = core_run(sb, B.words);
 		for (k = 0; k < batch; k++)
 		{
 			const uint16_t* q = rects + (done + k) * 4;
@@ -143,9 +153,15 @@ static int shim_tile(void* user, const int16_t* coef, const uint8_t quant[3][10]
 				for (x = 0; x < rw; x++)
 				{
 					const ogpu_u8* p = arena + canvas + ((y0 + y) * 64 + x0 + x) * 4;
-					px[(size_t)(q[1] + y) * sw + q[0] + x] =
-					    ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+					uint32_t v = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+					garbage_px += v == POISON;
+					px[(size_t)(q[1] + y) * sw + q[0] + x] = v;
 				}
+		}
+		if (r != OGPU_OK)
+		{
+			tile_core_fails++;
+			return 0;   /* ogpu_prog.c: run() != OGPU_OK -> the CPU renders the whole tile again */
 		}
 		done += batch;
 	} while (done < nrects);
@@ -278,7 +294,6 @@ static int run_frames(int re, int seed, int use_clip)
 	memset(&acc, 0, sizeof(acc));
 	acc.rlgr = shim_rlgr;
 	acc.tile = shim_tile;
-	inject_rlgr_err_data = 0;
 	inject_tile_fail_after = 0;
 	for (pass = 0; pass < 2; pass++)
 	{
@@ -323,7 +338,7 @@ static int run_frames(int re, int seed, int use_clip)
 	s_all += W * H;
 	CHECK(diff == 0, "seed %d re %d clip %d: %d pixels differ", seed, re, use_clip, diff);
 	CHECK(st[0].simple == st[1].simple && st[0].first == st[1].first && st[0].upgrade == st[1].upgrade &&
-	      st[0].skipped == st[1].skipped && st[0].painted == st[1].painted,
+	      st[0].skipped == st[1].skipped && st[0].painted == st[1].painted && st[0].empty_skip == st[1].empty_skip,
 	      "seed %d: stats differ", seed);
 	CHECK(st[1].accel_tiles > 0 && st[1].accel_rlgr > 0 && st[1].cpu_fallback == 0 && st[0].accel_tiles == 0,
 	      "seed %d: accel %u/%u fallback %u", seed, (unsigned)st[1].accel_tiles, (unsigned)st[1].accel_rlgr,
@@ -336,67 +351,213 @@ static int run_frames(int re, int seed, int use_clip)
 	return (int)st[1].accel_tiles;
 }
 
-/* OGPU_ERR_DATA from RLGR becomes RDP_PROG_E_PROTO (no CPU redo of that step). */
-static void test_rlgr_err_data(void)
+/* One region of one simple tile at (0, 0) with a whole-tile rect, whose
+ * three components are given byte for byte. */
+static size_t make_simple_tile(uint8_t* buf, const uint8_t* const comp[3], const int clen[3])
 {
-	static uint8_t frame[200000];
-	enum { GW = 1, GH = 1, W = 64, H = 64 };
+	uint8_t *p = buf, *len_at, *tsize_at, *tiles, *t;
+	int i, c;
+	p = put16(p, 0xCCC4);
+	len_at = p; p += 4;
+	*p++ = 64;
+	p = put16(p, 1);
+	*p++ = 1; *p++ = 1; *p++ = 0;
+	p = put16(p, 1);
+	tsize_at = p; p += 4;
+	p = put16(p, 0); p = put16(p, 0); p = put16(p, 64); p = put16(p, 64);
+	for (i = 0; i < 5; i++)
+		*p++ = 0x66;
+	*p++ = 0;
+	for (i = 0; i < 15; i++)
+		*p++ = 0;
+	tiles = p;
+	t = p;
+	p = put16(p, 0xCCC5);
+	p += 4;
+	*p++ = 0; *p++ = 0; *p++ = 0;
+	p = put16(p, 0); p = put16(p, 0);
+	*p++ = 0;
+	for (c = 0; c < 3; c++)
+		p = put16(p, (unsigned)clen[c]);
+	p = put16(p, 0);
+	for (c = 0; c < 3; c++)
+	{
+		memcpy(p, comp[c], (size_t)clen[c]);
+		p += clen[c];
+	}
+	put32(t + 2, (uint32_t)(p - t));
+	put32(tsize_at, (uint32_t)(p - tiles));
+	put32(len_at, (uint32_t)(p - buf));
+	return (size_t)(p - buf);
+}
+
+/* Truncated RLGR1 through the real core. [MS-RDPRFX] RLGR reads zeros past
+ * the end, and the decoder only gives up 64 bits past it; for <= 4096
+ * coefficients the zero runs finish the component within 62 bits (k = 0 with
+ * kr = 10 at the end costs at most 11 + 11 + 10 + 10 bits, then the runs
+ * double every 2 bits: 20 more), so a short stream is never OGPU_ERR_DATA
+ * in the core, nor an error in rdp_rlgr1_decode. The 10 bytes below are the
+ * worst case a search found (62 bits over). Both paths must decode it, to
+ * the same pixels. */
+static int run_simple(const uint8_t* frame, size_t len, struct rdp_prog_accel* acc, uint32_t* px,
+                      struct rdp_prog_stats* st)
+{
 	struct rdp_prog_surface ps;
-	struct rdp_prog_stats st;
-	struct rdp_prog_accel acc;
-	uint32_t* px = calloc(W * H, 4);
-	int tx[1] = { 0 }, ty[1] = { 0 }, rc;
-	size_t len;
+	int rc;
 	memset(&ps, 0, sizeof(ps));
-	memset(&st, 0, sizeof(st));
+	memset(st, 0, sizeof(*st));
+	memset(px, 0, 64 * 64 * 4);
+	rdp_progressive_set_accel(acc);
+	rc = rdp_progressive_decode(&ps, NULL, frame, len, px, 64, 64, NULL, NULL, st, NULL);
+	rdp_progressive_set_accel(NULL);
+	rdp_progressive_free(&ps, NULL);
+	return rc;
+}
+
+static void test_rlgr_truncated(void)
+{
+	static uint8_t frame[4096];
+	static const uint8_t worst[10] = { 0xBF, 0xDF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFB };
+	static const uint8_t ones[3] = { 0xFF, 0xFF, 0xFF };
+	static const uint8_t zero[1] = { 0 };
+	static uint32_t px[2][64 * 64];
+	const uint8_t* comp[3];
+	int clen[3], rc[2], i, diff = 0, t;
+	struct rdp_prog_stats st[2];
+	struct rdp_prog_accel acc;
 	memset(&acc, 0, sizeof(acc));
 	acc.rlgr = shim_rlgr;
 	acc.tile = shim_tile;
-	inject_rlgr_err_data = 1;
-	inject_tile_fail_after = 0;
-	rng = 99;
-	len = make_region(frame, 0, 0, GW, GH, 1, tx, ty, 0);
-	rdp_progressive_set_accel(&acc);
-	rc = rdp_progressive_decode(&ps, NULL, frame, len, px, W, H, NULL, NULL, &st, NULL);
-	rdp_progressive_set_accel(NULL);
-	CHECK(rc == RDP_PROG_E_PROTO, "ERR_DATA map: rc %d", rc);
-	CHECK(st.cpu_fallback == 0, "ERR_DATA must not CPU-fallback RLGR, got %u", (unsigned)st.cpu_fallback);
-	rdp_progressive_free(&ps, NULL);
-	free(px);
-	printf("  ERR_DATA -> PROTO: ok\n");
+	for (t = 0; t < 3; t++)
+	{
+		comp[0] = t == 0 ? worst : zero; clen[0] = t == 0 ? (int)sizeof worst : (int)sizeof zero;
+		comp[1] = t == 1 ? worst : ones; clen[1] = t == 1 ? (int)sizeof worst : (int)sizeof ones;
+		comp[2] = t == 2 ? worst : zero; clen[2] = t == 2 ? (int)sizeof worst : 0;
+		{
+			size_t len = make_simple_tile(frame, comp, clen);
+			rc[0] = run_simple(frame, len, NULL, px[0], &st[0]);
+			last_rlgr_core = -999;
+			rc[1] = run_simple(frame, len, &acc, px[1], &st[1]);
+		}
+		for (i = 0; i < 64 * 64; i++)
+			diff += px[0][i] != px[1][i];
+		CHECK(rc[0] == 0 && rc[1] == 0, "truncated RLGR %d: rc %d / %d", t, rc[0], rc[1]);
+		CHECK(last_rlgr_core == OGPU_OK && st[1].accel_rlgr == 1 && st[1].cpu_fallback == 0,
+		      "truncated RLGR %d: core %d accel_rlgr %u", t, last_rlgr_core, (unsigned)st[1].accel_rlgr);
+	}
+	CHECK(diff == 0, "truncated RLGR: %d pixels differ", diff);
+	printf("  truncated RLGR (62 bits past the end) -> core OGPU_OK, pixel-exact with the CPU: ok\n");
 }
 
-/* Failed follow-on batch: tile hook returns 0, progressive redraws on CPU. */
+/* A real core error from RLGR_DEC other than OGPU_ERR_DATA (here
+ * OGPU_ERR_NOMAP: the output address is outside the arena) returns 0 from
+ * the hook; progressive.c decodes on the CPU and the pixels match. The
+ * hook's OGPU_ERR_DATA -> RDP_PROG_E_PROTO branch is kept for drivers, but
+ * the core can't answer ERR_DATA for 4096 coefficients (see above). */
+static int rlgr_nomap;
+static int shim_rlgr_nomap(void* user, const uint8_t* const src[3], const uint16_t len[3], int re, int16_t* out)
+{
+	unsigned char sb[128];
+	struct OGPUBatch B;
+	int c, r;
+	(void)user; (void)out;
+	ogpu_batch_init(&B, sb, sizeof sb / 4);
+	for (c = 0; c < 3; c++)
+	{
+		size_t n = len[c] > SRC_SLOT ? SRC_SLOT : len[c];
+		memcpy(arena + SRC_A + (size_t)c * SRC_SLOT, src[c], n);
+		ogpu_rlgr_dec(&B, SRC_A + (unsigned long)c * SRC_SLOT, len[c],
+		              c == 1 ? 0xFFFFF000UL : VAL_A + (unsigned long)c * 8192, 4096,
+		              OGPU_RLGR_LL3_DELTA | (re ? OGPU_RFX_RE : 0));
+	}
+	r = core_run(sb, B.words);
+	last_rlgr_core = r;
+	if (r == OGPU_OK)
+		return 1;
+	rlgr_nomap += r == OGPU_ERR_NOMAP;
+	return r == OGPU_ERR_DATA ? RDP_PROG_E_PROTO : 0;   /* as ogpu_prog.c rlgr1() */
+}
+
+static void test_rlgr_core_error(void)
+{
+	static uint8_t frame[200000];
+	static uint32_t px[2][64 * 64];
+	int tx[1] = { 0 }, ty[1] = { 0 }, rc[2], i, diff = 0;
+	struct rdp_prog_stats st[2];
+	struct rdp_prog_accel acc;
+	size_t len;
+	memset(&acc, 0, sizeof(acc));
+	acc.rlgr = shim_rlgr_nomap;
+	acc.tile = shim_tile;
+	rng = 99;
+	len = make_region(frame, 0, 0, 1, 1, 1, tx, ty, 0);
+	rlgr_nomap = 0;
+	rc[0] = run_simple(frame, len, NULL, px[0], &st[0]);
+	rc[1] = run_simple(frame, len, &acc, px[1], &st[1]);
+	for (i = 0; i < 64 * 64; i++)
+		diff += px[0][i] != px[1][i];
+	CHECK(rc[0] == 0 && rc[1] == 0, "RLGR core error: rc %d / %d", rc[0], rc[1]);
+	CHECK(last_rlgr_core == OGPU_ERR_NOMAP && rlgr_nomap == 1, "RLGR core error: core %d", last_rlgr_core);
+	CHECK(st[1].accel_rlgr == 0 && st[1].cpu_fallback == 1 && st[1].accel_tiles == 1,
+	      "RLGR core error: accel_rlgr %u fallback %u accel_tiles %u", (unsigned)st[1].accel_rlgr,
+	      (unsigned)st[1].cpu_fallback, (unsigned)st[1].accel_tiles);
+	CHECK(diff == 0, "RLGR core error: %d pixels differ", diff);
+	printf("  RLGR_DEC core error (NOMAP) -> CPU RLGR, pixel-exact: ok\n");
+}
+
+/* Follow-on batch fails in the real core (unmapped YCBCR destination) after
+ * the first batch and part of the second wrote into px (and the failing
+ * rect leaves poison there): progressive.c redraws the whole tile on the
+ * CPU, and the surface must end up equal to a CPU-only decode. */
 static void test_tile_batch_fail(void)
 {
 	static uint8_t frame[400000];
 	enum { GW = 2, GH = 2, W = 128, H = 128 };
-	struct rdp_prog_surface ps;
-	struct rdp_prog_stats st;
+	struct rdp_prog_surface ps[2];
+	struct rdp_prog_stats st[2];
 	struct rdp_prog_accel acc;
-	uint32_t* px = calloc(W * H, 4);
-	int tx[1] = { 0 }, ty[1] = { 0 }, rc;
+	uint32_t* px[2];
+	int tx[1] = { 0 }, ty[1] = { 0 }, rc[2], pass, i, diff = 0, fails_before;
+	long garbage_before;
 	size_t len;
-	memset(&ps, 0, sizeof(ps));
-	memset(&st, 0, sizeof(st));
 	memset(&acc, 0, sizeof(acc));
 	acc.rlgr = shim_rlgr;
 	acc.tile = shim_tile;
-	inject_rlgr_err_data = 0;
-	inject_tile_fail_after = 2;   /* first Submit (TILE+32) ok; second batch fails */
-	tile_submits = 0;
 	rng = 123;
-	len = make_region(frame, 0, 0, GW, GH, 1, tx, ty, 40);   /* >32 rects */
-	rdp_progressive_set_accel(&acc);
-	rc = rdp_progressive_decode(&ps, NULL, frame, len, px, W, H, NULL, NULL, &st, NULL);
+	len = make_region(frame, 0, 0, GW, GH, 1, tx, ty, 40);   /* >32 rects: two batches */
+	for (pass = 0; pass < 2; pass++)
+	{
+		memset(&ps[pass], 0, sizeof(ps[pass]));
+		memset(&st[pass], 0, sizeof(st[pass]));
+		px[pass] = calloc((size_t)W * H, 4);
+	}
+	inject_tile_fail_after = 0;
 	rdp_progressive_set_accel(NULL);
-	CHECK(rc == 0, "batch-fail decode rc %d", rc);
-	CHECK(st.cpu_fallback >= 1, "batch-fail: expected cpu_fallback, got %u", (unsigned)st.cpu_fallback);
-	CHECK(tile_submits >= 2, "batch-fail: expected >=2 tile Submits, got %d", tile_submits);
-	rdp_progressive_free(&ps, NULL);
-	free(px);
-	printf("  follow-on batch fail -> cpu_fallback: ok (submits=%d fallback=%u)\n",
-	       tile_submits, (unsigned)st.cpu_fallback);
+	rc[0] = rdp_progressive_decode(&ps[0], NULL, frame, len, px[0], W, H, NULL, NULL, &st[0], NULL);
+	tile_submits = 0;
+	fails_before = tile_core_fails;
+	garbage_before = garbage_px;
+	inject_tile_fail_after = 2;   /* first Submit (TILE+32) ok; the second batch fails in the core */
+	rdp_progressive_set_accel(&acc);
+	rc[1] = rdp_progressive_decode(&ps[1], NULL, frame, len, px[1], W, H, NULL, NULL, &st[1], NULL);
+	rdp_progressive_set_accel(NULL);
+	inject_tile_fail_after = 0;
+	for (i = 0; i < W * H; i++)
+		diff += px[0][i] != px[1][i];
+	CHECK(rc[0] == 0 && rc[1] == 0, "batch-fail decode rc %d / %d", rc[0], rc[1]);
+	CHECK(tile_submits == 2 && tile_core_fails == fails_before + 1,
+	      "batch-fail: submits %d, core fails %d", tile_submits, tile_core_fails - fails_before);
+	CHECK(garbage_px > garbage_before, "batch-fail: the failed batch left no poison in px (test doesn't bite)");
+	CHECK(st[1].cpu_fallback == 1 && st[1].accel_tiles == 0, "batch-fail: fallback %u accel_tiles %u",
+	      (unsigned)st[1].cpu_fallback, (unsigned)st[1].accel_tiles);
+	CHECK(diff == 0, "batch-fail: %d pixels differ from the CPU-only decode", diff);
+	for (pass = 0; pass < 2; pass++)
+	{
+		rdp_progressive_free(&ps[pass], NULL);
+		free(px[pass]);
+	}
+	printf("  follow-on batch fail (core NOMAP) -> CPU redo, pixel-exact: ok (poisoned px %ld)\n",
+	       garbage_px - garbage_before);
 }
 
 /* >32 rectangles: more than one YCBCR batch, still pixel-exact vs CPU. */
@@ -413,7 +574,6 @@ static void test_many_rects(void)
 	memset(&acc, 0, sizeof(acc));
 	acc.rlgr = shim_rlgr;
 	acc.tile = shim_tile;
-	inject_rlgr_err_data = 0;
 	inject_tile_fail_after = 0;
 	tile_submits = 0;
 	before = tile_submits;
@@ -442,7 +602,8 @@ static void test_many_rects(void)
 	printf("  >32 rects batched: ok (submits=%d)\n", tile_submits - before);
 }
 
-/* All stream rects outside the tile: tile hook sees nrects==0 and must not Submit. */
+/* All stream rects outside the tile (tile in the view): progressive.c counts
+ * empty_skip and never calls the hook, so no Submit and no accel_tiles. */
 static void test_clipped_skip(void)
 {
 	static uint8_t frame[200000];
@@ -461,13 +622,9 @@ static void test_clipped_skip(void)
 	memset(&acc, 0, sizeof(acc));
 	acc.rlgr = shim_rlgr;
 	acc.tile = shim_tile;
-	inject_rlgr_err_data = 0;
 	inject_tile_fail_after = 0;
-	/* Hand-build: one rect fully on the right tile; decode left tile with clip
-	 * so clipped count is 0 — render still calls tile() with n=0 when accel
-	 * is set and tile is in clip... Actually left tile is outside clip via
-	 * tile_in_clip → view_skip, never calls tile(). Need tile in clip but
-	 * all stream rects clipped away: tile overlaps clip, rects don't. */
+	/* The left tile is in the view clip, its one stream rect (x = 70) is not
+	 * on it: n == 0 after clipping. */
 	clip.x0 = 0; clip.y0 = 0; clip.x1 = 64; clip.y1 = 64; /* left tile in view */
 	p = frame;
 	p = put16(p, 0xCCC4);
@@ -507,12 +664,14 @@ static void test_clipped_skip(void)
 	rc = rdp_progressive_decode(&ps, NULL, frame, len, px, W, H, NULL, NULL, &st, &clip);
 	rdp_progressive_set_accel(NULL);
 	CHECK(rc == 0, "clipped-skip rc %d", rc);
-	CHECK(calls_tile == before + 1, "clipped-skip: tile hook should run once, got %d", calls_tile - before);
+	CHECK(calls_tile == before, "clipped-skip: tile hook must not run, ran %d", calls_tile - before);
 	CHECK(tile_submits == 0, "clipped-skip: no Submit expected, got %d", tile_submits);
-	CHECK(st.accel_tiles == 1, "clipped-skip: accel_tiles %u", (unsigned)st.accel_tiles);
+	CHECK(st.accel_tiles == 0 && st.cpu_fallback == 0 && st.empty_skip == 1,
+	      "clipped-skip: accel_tiles %u fallback %u empty_skip %u", (unsigned)st.accel_tiles,
+	      (unsigned)st.cpu_fallback, (unsigned)st.empty_skip);
 	rdp_progressive_free(&ps, NULL);
 	free(px);
-	printf("  all-rects-clipped skips Submit: ok\n");
+	printf("  all-rects-clipped -> empty_skip, no hook, no Submit: ok\n");
 }
 
 int main(int argc, char** argv)
@@ -527,7 +686,8 @@ int main(int argc, char** argv)
 	       seeds, tiles, calls_rlgr, s_all ? s_mid * 100 / s_all : 0, fails ? "MISMATCH" : "pixel-exact with the CPU path");
 	CHECK(s_mid * 10 > s_all, "too few unsaturated pixels to tell paths apart");
 	printf("failure / batch paths:\n");
-	test_rlgr_err_data();
+	test_rlgr_truncated();
+	test_rlgr_core_error();
 	test_tile_batch_fail();
 	test_many_rects();
 	test_clipped_skip();

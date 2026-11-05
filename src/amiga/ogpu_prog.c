@@ -12,11 +12,16 @@
  * Submit path. Soft spots without ONGPU: progressive.c still falls back if
  * a Submit/Wait fails after install.
  *
+ * Lab / debug only: ENV GFAmigaRDP/OGPUProgForce = 1 also installs when the
+ * answer is FULL/PARTIAL without ONGPU (the library's CPU core), so a bare
+ * Cradle exercises this file's stream building and address maths against
+ * the real core. Never set it on a user machine (Submit overhead, no gain).
+ *
  * Fallback after install: a Submit/Wait that fails (anything but
  * OGPU_ERR_DATA) returns 0 and progressive.c does that step on the CPU
  * itself. OGPU_ERR_DATA from RLGR_DEC is a malformed tile
  * (RDP_PROG_E_PROTO), as the CPU decoder would say. All rectangles clipped
- * away: skip RFX_TILE / YCBCR (nothing to paint).
+ * away: progressive.c skips the tile (stats.empty_skip), no Submit.
  *
  * The buffers are progressive.c's own (68k memory, big-endian as stream.h
  * asks for v1.10). Tile state and the PDUs stay in progressive.c.
@@ -28,6 +33,8 @@
 
 #include <proto/exec.h>
 #include <string.h>
+
+#include "amipr.h"
 
 #include <gfopengpu/gfopengpu.h>
 #include <gfopengpu/stream.h>
@@ -99,9 +106,10 @@ static int tile(void* user, const int16_t* coef, const uint8_t quant[3][10], int
 	(void)user;
 	if (!(s_ready & 2) || !OpenGPUBase || !px)
 		return 0;
-	/* Nothing to paint: leave coefs alone; skip RFX_TILE / YCBCR. */
+	/* progressive.c counts an all-clipped tile as empty_skip and never calls
+	 * here with nrects <= 0; say "not taken" rather than claim an accel tile. */
 	if (nrects <= 0)
-		return 1;
+		return 0;
 	*w++ = OGPU_HDR(OGPU_OP_RFX_TILE, 7);
 	*w++ = (ULONG)coef;
 	*w++ = (ULONG)&quant[0][0];
@@ -120,10 +128,21 @@ static int tile(void* user, const int16_t* coef, const uint8_t quant[3][10], int
 	return 1;
 }
 
+static int s_force;     /* lab only: GFAmigaRDP/OGPUProgForce */
+
 static int query_ongpu(ULONG op)
 {
 	ULONG q = OGPU_Query(op, OGPU_FMT_ARGB32);
-	return OGPU_ANSWER(q) != OGPU_NONE && OGPU_ONGPU(q);
+	return OGPU_ANSWER(q) != OGPU_NONE && (OGPU_ONGPU(q) || s_force);
+}
+
+/* Lab / debug only: "1" in GFAmigaRDP/OGPUProgForce takes the Submit path on
+ * the library's CPU core too (no ONGPU), to exercise this file on a Cradle. */
+static int lab_force(void)
+{
+	char v[4];
+	int n = amipr_getenv("GFAmigaRDP/OGPUProgForce", v, sizeof v);
+	return n == 1 && v[0] == '1';
 }
 
 void rdp_ogpu_prog_install(void)
@@ -134,6 +153,7 @@ void rdp_ogpu_prog_install(void)
 		OpenGPUBase = OpenLibrary((CONST_STRPTR)OPENGPU_NAME, OPENGPU_VERSION);
 	if (!OpenGPUBase)
 		return;
+	s_force = lab_force();
 	/* Prefer a real GPU driver (ONGPU). The library CPU core answers FULL
 	 * without that bit; using Submit there is the same maths plus overhead. */
 	if (query_ongpu(OGPU_OP_RLGR_DEC))
@@ -158,5 +178,5 @@ void rdp_ogpu_prog_remove(void)
 
 int rdp_ogpu_prog_ready(void)
 {
-	return s_ready;
+	return s_ready | (s_ready && s_force ? 4 : 0);
 }

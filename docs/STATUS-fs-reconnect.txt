@@ -32,3 +32,10 @@ Gaps
 - Certificate trust UI / favourites polish still phase 6 leftovers.
 
 Lab / stove filled after deploy.
+
+Lab deploy (this pass)
+- stove os32-gcc16 job j20261105T141610-d80be4: exit 0
+- lab_put restart: SYS:C/GFAmigaRDP
+  sha256 7edeb1910ae92178c6e2f93993eec52b17b4d0dd202af6ff3039cc733fc7544f
+- Previous binary archived under labs/gfamigardp-ui/archive/put-20261105T141800-5a96/
+- tip 2b51849c4370c8e656d3aafc3e5653d9781cf169 (code 94d1a1c)

@@ -25,6 +25,8 @@
 #include <netinet/tcp.h>
 #include <netdb.h>
 #include <proto/bsdsocket.h>
+#include <libraries/bsdsocket.h>
+#include <utility/tagitem.h>
 
 #ifndef FIONBIO
 #define FIONBIO _IOW('f', 126, long)
@@ -155,7 +157,26 @@ int amipr_tcp_connect(const char* host, uint16_t port, int64_t timeout_us)
 		memcpy(&sa.sin_addr.s_addr, ip, 4);
 	else
 	{
-		struct hostent* he = gethostbyname((STRPTR)host);
+		/* a slow name server holds gethostbyname, which does not wait in
+		 * amipr_wait; the abort hook's signals (the connection task's
+		 * port: Cancel) are added to bsdsocket's break mask for it, so
+		 * the stack breaks the lookup off as it does on Ctrl-C (review 2,
+		 * left from M2). A stack whose resolver does not look at the
+		 * mask still ends the lookup at its own timeout. */
+		uint32_t abort = amipr_abort_sigmask();
+		ULONG mask = SIGBREAKF_CTRL_C;
+		struct hostent* he;
+		if (abort && SocketBaseTags(SBTM_GETREF(SBTC_BREAKMASK), (ULONG)&mask, TAG_END) == 0)
+			SocketBaseTags(SBTM_SETVAL(SBTC_BREAKMASK), mask | abort, TAG_END);
+		else
+			abort = 0;
+		he = gethostbyname((STRPTR)host);
+		if (abort)
+		{
+			SocketBaseTags(SBTM_SETVAL(SBTC_BREAKMASK), mask, TAG_END);
+			if (amipr_abort_check())
+				return AMIPR_ECANCEL;
+		}
 		if (!he || he->h_addrtype != AF_INET || !he->h_addr_list || !he->h_addr_list[0])
 			return AMIPR_ENOTFOUND;
 		memcpy(&sa.sin_addr.s_addr, he->h_addr_list[0], 4);

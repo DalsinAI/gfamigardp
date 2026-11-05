@@ -18,6 +18,10 @@ extern struct Device* TimerBase;
 
 /* opened once by amipr_init() (from the first task that calls in) */
 extern struct Library* amipr_LocaleBase;
+/* the abort hook (amipr_set_abort) outside amipr_wait: its signals for the
+ * calling task (0 when it set none), and asking it now (1: stop) */
+uint32_t amipr_abort_sigmask(void);
+int amipr_abort_check(void);
 extern ULONG amipr_eclock_hz;
 
 /* per-task resources, cached; amipr_thread_exit() gives them back */

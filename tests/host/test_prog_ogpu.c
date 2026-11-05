@@ -4,6 +4,11 @@
  * src/amiga/ogpu_prog.c: they run gfopenrtg's core (library/opengpu,
  * ogpu_core.c + ogpu_dwt.c + ogpu_build.c, from GFOPENRTG) on an arena
  * whose buffers are big-endian, as on the Amiga.
+ *
+ * The stand-in matches ogpu_prog.c's control flow: TILE_RECTS=32 batches,
+ * surface-stride YCBCR writes, nrects==0 skips RFX_TILE, OGPU_ERR_DATA from
+ * RLGR maps to RDP_PROG_E_PROTO, and a failed follow-on batch returns 0 so
+ * progressive.c redraws the whole tile on the CPU (cpu_fallback).
  *   cc -std=c99 -Isrc/codec -I$GFOPENRTG/include -I$GFOPENRTG/library/opengpu \
  *      tests/host/test_prog_ogpu.c src/codec/progressive.c src/codec/gfx_fb.c \
  *      $GFOPENRTG/library/opengpu/ogpu_core.c $GFOPENRTG/library/opengpu/ogpu_dwt.c \
@@ -31,7 +36,10 @@ static ogpu_u8 arena[ARENA];
 #define QUANT_A 0x18000UL
 #define YCC_A   0x20000UL
 #define WORK_A  0x30000UL
-#define CANVAS_A 0x40000UL  /* 64 x 64 ARGB32 */
+#define CANVAS_A 0x40000UL  /* scratch unused by batched path; kept for size */
+
+#define SRC_SLOT 16384
+#define TILE_RECTS 32       /* same as src/amiga/ogpu_prog.c */
 
 static ogpu_u8* map(void* user, ogpu_u32 a, ogpu_u32 n)
 {
@@ -49,6 +57,9 @@ static int core_run(unsigned char* s, long words)
 }
 
 static int calls_rlgr, calls_tile;
+static int inject_rlgr_err_data;     /* next RLGR Submit reports OGPU_ERR_DATA */
+static int inject_tile_fail_after;   /* fail the Nth tile Submit (1-based); 0 = off */
+static int tile_submits;
 
 static int shim_rlgr(void* user, const uint8_t* const src[3], const uint16_t len[3], int re, int16_t* out)
 {
@@ -57,11 +68,21 @@ static int shim_rlgr(void* user, const uint8_t* const src[3], const uint16_t len
 	int c, i, r;
 	(void)user;
 	calls_rlgr++;
+	if (inject_rlgr_err_data)
+	{
+		inject_rlgr_err_data = 0;
+		return RDP_PROG_E_PROTO;   /* ogpu_prog.c: OGPU_ERR_DATA -> RDP_PROG_E_PROTO */
+	}
 	ogpu_batch_init(&B, sb, sizeof sb / 4);
 	for (c = 0; c < 3; c++)
 	{
-		memcpy(arena + SRC_A + c * 16384, src[c], len[c]);
-		ogpu_rlgr_dec(&B, SRC_A + (unsigned long)c * 16384, len[c], VAL_A + (unsigned long)c * 8192, 4096,
+		size_t n = len[c];
+		if (n > SRC_SLOT)
+			n = SRC_SLOT;   /* stand-in slots are 16 KB; never overrun the next */
+		memcpy(arena + SRC_A + (size_t)c * SRC_SLOT, src[c], n);
+		if (n < SRC_SLOT)
+			memset(arena + SRC_A + (size_t)c * SRC_SLOT + n, 0, SRC_SLOT - n);
+		ogpu_rlgr_dec(&B, SRC_A + (unsigned long)c * SRC_SLOT, len[c], VAL_A + (unsigned long)c * 8192, 4096,
 		              OGPU_RLGR_LL3_DELTA | (re ? OGPU_RFX_RE : 0));
 	}
 	r = core_run(sb, B.words);
@@ -74,41 +95,60 @@ static int shim_rlgr(void* user, const uint8_t* const src[3], const uint16_t len
 	return 1;
 }
 
+/* Mirrors ogpu_prog.c tile(): RFX_TILE once, then YCBCR in batches of 32,
+ * writing straight into the caller's surface (stride = sw pixels). */
 static int shim_tile(void* user, const int16_t* coef, const uint8_t quant[3][10], int re,
-                     int32_t* ycc, int32_t* tmp, uint32_t* px, uint16_t w, int tx, int ty,
+                     int32_t* ycc, int32_t* tmp, uint32_t* px, uint16_t sw, int tx, int ty,
                      const uint16_t* rects, int nrects)
 {
-	unsigned char sb[64];
+	unsigned char sb[7 * 4 + TILE_RECTS * 6 * 4 + 32];
 	struct OGPUBatch B;
-	int i, r, x, y;
+	int i, x, y, done = 0, k;
+	unsigned long canvas = CANVAS_A;
 	(void)user; (void)ycc; (void)tmp;
 	calls_tile++;
+	if (nrects <= 0)
+		return 1;   /* ogpu_prog.c: all rects clipped — no Submit */
 	for (i = 0; i < 3 * 4096; i++)
 	{
 		arena[COEF_A + i * 2] = (ogpu_u8)((uint16_t)coef[i] >> 8);
 		arena[COEF_A + i * 2 + 1] = (ogpu_u8)coef[i];
 	}
 	memcpy(arena + QUANT_A, &quant[0][0], 30);
-	ogpu_batch_init(&B, sb, sizeof sb / 4);
-	ogpu_rfx_tile(&B, COEF_A, QUANT_A, re ? OGPU_RFX_RE : 0, YCC_A, WORK_A, OGPU_RFX_TILE_WORK_BYTES);
-	if (core_run(sb, B.words) != OGPU_OK)
-		return 0;
-	for (r = 0; r < nrects; r++)
+	/* First batch: RFX_TILE + up to TILE_RECTS YCBCRs into a 64-wide scratch,
+	 * then copy out with surface stride (Amiga writes straight to px). */
+	do
 	{
-		const uint16_t* q = rects + r * 4;
-		int x0 = q[0] - tx, y0 = q[1] - ty, rw = q[2] - q[0], rh = q[3] - q[1];
+		int batch = 0;
 		ogpu_batch_init(&B, sb, sizeof sb / 4);
-		ogpu_rfx_ycbcr(&B, YCC_A, x0, y0, rw, rh, CANVAS_A + (unsigned long)(y0 * 64 + x0) * 4, 256);
+		if (done == 0)
+			ogpu_rfx_tile(&B, COEF_A, QUANT_A, re ? OGPU_RFX_RE : 0, YCC_A, WORK_A, OGPU_RFX_TILE_WORK_BYTES);
+		for (k = 0; k < TILE_RECTS && done + k < nrects; k++)
+		{
+			const uint16_t* q = rects + (done + k) * 4;
+			int x0 = q[0] - tx, y0 = q[1] - ty, rw = q[2] - q[0], rh = q[3] - q[1];
+			ogpu_rfx_ycbcr(&B, YCC_A, x0, y0, rw, rh, canvas + (unsigned long)(y0 * 64 + x0) * 4, 256);
+			batch++;
+		}
+		tile_submits++;
+		if (inject_tile_fail_after && tile_submits == inject_tile_fail_after)
+			return 0;   /* follow-on (or first) batch failed: whole tile on CPU */
 		if (core_run(sb, B.words) != OGPU_OK)
 			return 0;
-		for (y = 0; y < rh; y++)
-			for (x = 0; x < rw; x++)
-			{
-				const ogpu_u8* p = arena + CANVAS_A + ((y0 + y) * 64 + x0 + x) * 4;
-				px[(size_t)(q[1] + y) * w + q[0] + x] =
-				    ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
-			}
-	}
+		for (k = 0; k < batch; k++)
+		{
+			const uint16_t* q = rects + (done + k) * 4;
+			int x0 = q[0] - tx, y0 = q[1] - ty, rw = q[2] - q[0], rh = q[3] - q[1];
+			for (y = 0; y < rh; y++)
+				for (x = 0; x < rw; x++)
+				{
+					const ogpu_u8* p = arena + canvas + ((y0 + y) * 64 + x0 + x) * 4;
+					px[(size_t)(q[1] + y) * sw + q[0] + x] =
+					    ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+				}
+		}
+		done += batch;
+	} while (done < nrects);
 	return 1;
 }
 
@@ -136,10 +176,11 @@ static uint8_t* rand_bytes(uint8_t* p, int n)
 
 /* One frame: a region with nrects rectangles, 2 quants, 2 progressive
  * qualities and ntiles tiles of the given kind (0 simple, 1 first, 2 upgrade). */
-static size_t make_region(uint8_t* buf, int re, int kind, int gw, int gh, int ntiles, const int* tx, const int* ty)
+static size_t make_region(uint8_t* buf, int re, int kind, int gw, int gh, int ntiles, const int* tx, const int* ty,
+                          int force_nrects)
 {
 	uint8_t *p = buf, *len_at, *tsize_at, *tiles;
-	int nrects = 1 + (int)(rnd() % 4), i, k, c;
+	int nrects = force_nrects > 0 ? force_nrects : 1 + (int)(rnd() % 4), i, k, c;
 	p = put16(p, 0xCCC4);
 	len_at = p; p += 4;
 	*p++ = 64;                 /* tileSize */
@@ -151,9 +192,24 @@ static size_t make_region(uint8_t* buf, int re, int kind, int gw, int gh, int nt
 	tsize_at = p; p += 4;
 	for (i = 0; i < nrects; i++)
 	{
-		int x = (int)(rnd() % (unsigned)(gw * 64)), y = (int)(rnd() % (unsigned)(gh * 64));
-		int w = 1 + (int)(rnd() % (unsigned)(gw * 64 - x)), h = 1 + (int)(rnd() % (unsigned)(gh * 64 - y));
-		if (i == 0 && rnd() % 2) { x = y = 0; w = gw * 64; h = gh * 64; }
+		int x, y, w, h;
+		if (force_nrects > 0)
+		{
+			/* Pack tiny rects inside the first tile so one tile sees >32. */
+			x = (i % 8) * 4;
+			y = (i / 8) * 4;
+			if (y > 60) y = 60;
+			w = 2;
+			h = 2;
+		}
+		else
+		{
+			x = (int)(rnd() % (unsigned)(gw * 64));
+			y = (int)(rnd() % (unsigned)(gh * 64));
+			w = 1 + (int)(rnd() % (unsigned)(gw * 64 - x));
+			h = 1 + (int)(rnd() % (unsigned)(gh * 64 - y));
+			if (i == 0 && rnd() % 2) { x = y = 0; w = gw * 64; h = gh * 64; }
+		}
 		p = put16(p, (unsigned)x); p = put16(p, (unsigned)y); p = put16(p, (unsigned)w); p = put16(p, (unsigned)h);
 	}
 	for (i = 0; i < 2 * 5; i++)
@@ -222,6 +278,8 @@ static int run_frames(int re, int seed, int use_clip)
 	memset(&acc, 0, sizeof(acc));
 	acc.rlgr = shim_rlgr;
 	acc.tile = shim_tile;
+	inject_rlgr_err_data = 0;
+	inject_tile_fail_after = 0;
 	for (pass = 0; pass < 2; pass++)
 	{
 		memset(&ps[pass], 0, sizeof(ps[pass]));
@@ -239,11 +297,7 @@ static int run_frames(int re, int seed, int use_clip)
 				ty[n] = i / GW;
 				n++;
 			}
-		{
-			uint32_t keep = rng;
-			len = make_region(frame, re, kind, GW, GH, n, tx, ty);
-			(void)keep;
-		}
+		len = make_region(frame, re, kind, GW, GH, n, tx, ty, 0);
 		for (pass = 0; pass < 2; pass++)
 		{
 			rdp_progressive_set_accel(pass ? &acc : NULL);
@@ -282,6 +336,185 @@ static int run_frames(int re, int seed, int use_clip)
 	return (int)st[1].accel_tiles;
 }
 
+/* OGPU_ERR_DATA from RLGR becomes RDP_PROG_E_PROTO (no CPU redo of that step). */
+static void test_rlgr_err_data(void)
+{
+	static uint8_t frame[200000];
+	enum { GW = 1, GH = 1, W = 64, H = 64 };
+	struct rdp_prog_surface ps;
+	struct rdp_prog_stats st;
+	struct rdp_prog_accel acc;
+	uint32_t* px = calloc(W * H, 4);
+	int tx[1] = { 0 }, ty[1] = { 0 }, rc;
+	size_t len;
+	memset(&ps, 0, sizeof(ps));
+	memset(&st, 0, sizeof(st));
+	memset(&acc, 0, sizeof(acc));
+	acc.rlgr = shim_rlgr;
+	acc.tile = shim_tile;
+	inject_rlgr_err_data = 1;
+	inject_tile_fail_after = 0;
+	rng = 99;
+	len = make_region(frame, 0, 0, GW, GH, 1, tx, ty, 0);
+	rdp_progressive_set_accel(&acc);
+	rc = rdp_progressive_decode(&ps, NULL, frame, len, px, W, H, NULL, NULL, &st, NULL);
+	rdp_progressive_set_accel(NULL);
+	CHECK(rc == RDP_PROG_E_PROTO, "ERR_DATA map: rc %d", rc);
+	CHECK(st.cpu_fallback == 0, "ERR_DATA must not CPU-fallback RLGR, got %u", (unsigned)st.cpu_fallback);
+	rdp_progressive_free(&ps, NULL);
+	free(px);
+	printf("  ERR_DATA -> PROTO: ok\n");
+}
+
+/* Failed follow-on batch: tile hook returns 0, progressive redraws on CPU. */
+static void test_tile_batch_fail(void)
+{
+	static uint8_t frame[400000];
+	enum { GW = 2, GH = 2, W = 128, H = 128 };
+	struct rdp_prog_surface ps;
+	struct rdp_prog_stats st;
+	struct rdp_prog_accel acc;
+	uint32_t* px = calloc(W * H, 4);
+	int tx[1] = { 0 }, ty[1] = { 0 }, rc;
+	size_t len;
+	memset(&ps, 0, sizeof(ps));
+	memset(&st, 0, sizeof(st));
+	memset(&acc, 0, sizeof(acc));
+	acc.rlgr = shim_rlgr;
+	acc.tile = shim_tile;
+	inject_rlgr_err_data = 0;
+	inject_tile_fail_after = 2;   /* first Submit (TILE+32) ok; second batch fails */
+	tile_submits = 0;
+	rng = 123;
+	len = make_region(frame, 0, 0, GW, GH, 1, tx, ty, 40);   /* >32 rects */
+	rdp_progressive_set_accel(&acc);
+	rc = rdp_progressive_decode(&ps, NULL, frame, len, px, W, H, NULL, NULL, &st, NULL);
+	rdp_progressive_set_accel(NULL);
+	CHECK(rc == 0, "batch-fail decode rc %d", rc);
+	CHECK(st.cpu_fallback >= 1, "batch-fail: expected cpu_fallback, got %u", (unsigned)st.cpu_fallback);
+	CHECK(tile_submits >= 2, "batch-fail: expected >=2 tile Submits, got %d", tile_submits);
+	rdp_progressive_free(&ps, NULL);
+	free(px);
+	printf("  follow-on batch fail -> cpu_fallback: ok (submits=%d fallback=%u)\n",
+	       tile_submits, (unsigned)st.cpu_fallback);
+}
+
+/* >32 rectangles: more than one YCBCR batch, still pixel-exact vs CPU. */
+static void test_many_rects(void)
+{
+	static uint8_t frame[400000];
+	enum { GW = 2, GH = 2, W = 128, H = 128 };
+	struct rdp_prog_surface ps[2];
+	struct rdp_prog_stats st[2];
+	struct rdp_prog_accel acc;
+	uint32_t* px[2];
+	int tx[1] = { 0 }, ty[1] = { 0 }, pass, i, diff = 0, before;
+	size_t len;
+	memset(&acc, 0, sizeof(acc));
+	acc.rlgr = shim_rlgr;
+	acc.tile = shim_tile;
+	inject_rlgr_err_data = 0;
+	inject_tile_fail_after = 0;
+	tile_submits = 0;
+	before = tile_submits;
+	rng = 7;
+	len = make_region(frame, 1, 0, GW, GH, 1, tx, ty, 40);
+	for (pass = 0; pass < 2; pass++)
+	{
+		memset(&ps[pass], 0, sizeof(ps[pass]));
+		memset(&st[pass], 0, sizeof(st[pass]));
+		px[pass] = calloc((size_t)W * H, 4);
+		rdp_progressive_set_accel(pass ? &acc : NULL);
+		CHECK(rdp_progressive_decode(&ps[pass], NULL, frame, len, px[pass], W, H, NULL, NULL, &st[pass], NULL) == 0,
+		      "many-rects pass %d", pass);
+	}
+	rdp_progressive_set_accel(NULL);
+	for (i = 0; i < W * H; i++)
+		diff += px[0][i] != px[1][i];
+	CHECK(diff == 0, "many-rects: %d pixels differ", diff);
+	CHECK(st[1].cpu_fallback == 0 && st[1].accel_tiles >= 1, "many-rects accel/fallback");
+	CHECK(tile_submits - before >= 2, "many-rects: need >1 batch, got %d", tile_submits - before);
+	for (pass = 0; pass < 2; pass++)
+	{
+		rdp_progressive_free(&ps[pass], NULL);
+		free(px[pass]);
+	}
+	printf("  >32 rects batched: ok (submits=%d)\n", tile_submits - before);
+}
+
+/* All stream rects outside the tile: tile hook sees nrects==0 and must not Submit. */
+static void test_clipped_skip(void)
+{
+	static uint8_t frame[200000];
+	enum { GW = 2, GH = 1, W = 128, H = 64 };
+	struct rdp_prog_surface ps;
+	struct rdp_prog_stats st;
+	struct rdp_prog_accel acc;
+	struct rdp_prog_clip clip = { 70, 0, 128, 64 }; /* only right tile visible */
+	uint32_t* px = calloc(W * H, 4);
+	int tx[1] = { 0 }, ty[1] = { 0 }; /* left tile: all rects after clip → n=0 */
+	int before, rc;
+	size_t len;
+	uint8_t *p, *len_at, *tsize_at, *tiles, *t;
+	memset(&ps, 0, sizeof(ps));
+	memset(&st, 0, sizeof(st));
+	memset(&acc, 0, sizeof(acc));
+	acc.rlgr = shim_rlgr;
+	acc.tile = shim_tile;
+	inject_rlgr_err_data = 0;
+	inject_tile_fail_after = 0;
+	/* Hand-build: one rect fully on the right tile; decode left tile with clip
+	 * so clipped count is 0 — render still calls tile() with n=0 when accel
+	 * is set and tile is in clip... Actually left tile is outside clip via
+	 * tile_in_clip → view_skip, never calls tile(). Need tile in clip but
+	 * all stream rects clipped away: tile overlaps clip, rects don't. */
+	clip.x0 = 0; clip.y0 = 0; clip.x1 = 64; clip.y1 = 64; /* left tile in view */
+	p = frame;
+	p = put16(p, 0xCCC4);
+	len_at = p; p += 4;
+	*p++ = 64;
+	p = put16(p, 1);   /* one rect entirely on the right tile */
+	*p++ = 1; *p++ = 1; *p++ = 0;
+	p = put16(p, 1);   /* one tile */
+	tsize_at = p; p += 4;
+	p = put16(p, 70); p = put16(p, 0); p = put16(p, 20); p = put16(p, 20); /* x=70 outside left */
+	{
+		int i;
+		for (i = 0; i < 5; i++)
+			*p++ = 0x66;
+		*p++ = 0;
+		for (i = 0; i < 15; i++)
+			*p++ = 0;
+	}
+	tiles = p;
+	t = p;
+	p = put16(p, 0xCCC5);
+	p += 4;
+	*p++ = 0; *p++ = 0; *p++ = 0;
+	p = put16(p, 0); p = put16(p, 0); /* left tile */
+	*p++ = 0;
+	p = put16(p, 300); p = put16(p, 300); p = put16(p, 300);
+	p = put16(p, 0);
+	p = rand_bytes(p, 300); p = rand_bytes(p, 300); p = rand_bytes(p, 300);
+	put32(t + 2, (uint32_t)(p - t));
+	put32(tsize_at, (uint32_t)(p - tiles));
+	put32(len_at, (uint32_t)(p - frame));
+	len = (size_t)(p - frame);
+	(void)tx; (void)ty;
+	before = calls_tile;
+	tile_submits = 0;
+	rdp_progressive_set_accel(&acc);
+	rc = rdp_progressive_decode(&ps, NULL, frame, len, px, W, H, NULL, NULL, &st, &clip);
+	rdp_progressive_set_accel(NULL);
+	CHECK(rc == 0, "clipped-skip rc %d", rc);
+	CHECK(calls_tile == before + 1, "clipped-skip: tile hook should run once, got %d", calls_tile - before);
+	CHECK(tile_submits == 0, "clipped-skip: no Submit expected, got %d", tile_submits);
+	CHECK(st.accel_tiles == 1, "clipped-skip: accel_tiles %u", (unsigned)st.accel_tiles);
+	rdp_progressive_free(&ps, NULL);
+	free(px);
+	printf("  all-rects-clipped skips Submit: ok\n");
+}
+
 int main(int argc, char** argv)
 {
 	int seeds = argc > 1 ? atoi(argv[1]) : 40, s, tiles = 0;
@@ -293,5 +526,10 @@ int main(int argc, char** argv)
 	printf("progressive via OpenGPU: %d seeds, %d tiles through RFX_TILE, %d RLGR batches, %ld%% of pixels unsaturated, %s\n",
 	       seeds, tiles, calls_rlgr, s_all ? s_mid * 100 / s_all : 0, fails ? "MISMATCH" : "pixel-exact with the CPU path");
 	CHECK(s_mid * 10 > s_all, "too few unsaturated pixels to tell paths apart");
+	printf("failure / batch paths:\n");
+	test_rlgr_err_data();
+	test_tile_batch_fail();
+	test_many_rects();
+	test_clipped_skip();
 	return fails != 0;
 }

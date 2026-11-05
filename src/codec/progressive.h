@@ -6,8 +6,9 @@
  * the Reduce-Extrapolate band layout, sub-band diffing, progressive passes
  * (SRL and raw bits) from [MS-RDPEGFX]. Decodes into 0xAARRGGBB surfaces.
  * Written from the public specifications only (CLEAN-ROOM.md).
- * The compute kernels run in OpenGPU when gfopengpu.library 0.27 answers
- * (struct rdp_prog_accel); the CPU kernels here are the fallback.
+ * The compute kernels run in OpenGPU when a driver answers with OGPU_ONGPU
+ * (struct rdp_prog_accel via ogpu_prog.c); the CPU kernels here are the
+ * fallback on a bare 68040 (library FULL without ONGPU).
  * Plain C99. MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #ifndef RDP_PROGRESSIVE_H

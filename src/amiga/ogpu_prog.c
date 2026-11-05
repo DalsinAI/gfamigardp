@@ -3,15 +3,20 @@
  * stream v1.10): OGPU_OP_RLGR_DEC for the three components' entropy decode
  * (with LL3's deltas), and per tile one batch of OGPU_OP_RFX_TILE
  * (dequantize + inverse DWT of Y, Cb, Cr) and an OGPU_OP_RFX_YCBCR for each
- * of the tile's rectangles, straight into the surface. The library's CPU
- * back end runs them on the 68k today, bit-exact with progressive.c's own
- * kernels; a driver (ACRTG.gpu, PiStorm.gpu) that answers them in
- * OGPU_Query takes them over with no change here.
+ * of the tile's rectangles, straight into the surface.
  *
- * Fallback: no library, a Query that says NONE, or a Submit/Wait that fails
- * (anything but OGPU_ERR_DATA) returns 0 and progressive.c does that step on
- * the CPU itself. OGPU_ERR_DATA from RLGR_DEC is a malformed tile
- * (RDP_PROG_E_PROTO), as the CPU decoder would say.
+ * Install only when OGPU_Query answers with OGPU_ONGPU_BIT set for the ops
+ * used. The library's CPU core answers OGPU_FULL without that bit, so a bare
+ * 68040 keeps progressive.c's own proven CPU kernels (same maths, no Submit
+ * overhead). A driver (ACRTG.gpu, PiStorm.gpu) that claims ONGPU takes the
+ * Submit path. Soft spots without ONGPU: progressive.c still falls back if
+ * a Submit/Wait fails after install.
+ *
+ * Fallback after install: a Submit/Wait that fails (anything but
+ * OGPU_ERR_DATA) returns 0 and progressive.c does that step on the CPU
+ * itself. OGPU_ERR_DATA from RLGR_DEC is a malformed tile
+ * (RDP_PROG_E_PROTO), as the CPU decoder would say. All rectangles clipped
+ * away: skip RFX_TILE / YCBCR (nothing to paint).
  *
  * The buffers are progressive.c's own (68k memory, big-endian as stream.h
  * asks for v1.10). Tile state and the PDUs stay in progressive.c.
@@ -49,7 +54,8 @@ static LONG run(ULONG* end)
 	return r;
 }
 
-static int rlgr3(void* user, const uint8_t* const src[3], const uint16_t len[3], int re, int16_t* out)
+/* Three-component RLGR1 (not RLGR3 / OGPU_RLGR_MODE3). */
+static int rlgr1(void* user, const uint8_t* const src[3], const uint16_t len[3], int re, int16_t* out)
 {
 	ULONG* w = s_stream;
 	ULONG flags = OGPU_RLGR_LL3_DELTA | (re ? OGPU_RFX_RE : 0);
@@ -93,6 +99,9 @@ static int tile(void* user, const int16_t* coef, const uint8_t quant[3][10], int
 	(void)user;
 	if (!(s_ready & 2) || !OpenGPUBase || !px)
 		return 0;
+	/* Nothing to paint: leave coefs alone; skip RFX_TILE / YCBCR. */
+	if (nrects <= 0)
+		return 1;
 	*w++ = OGPU_HDR(OGPU_OP_RFX_TILE, 7);
 	*w++ = (ULONG)coef;
 	*w++ = (ULONG)&quant[0][0];
@@ -111,6 +120,12 @@ static int tile(void* user, const int16_t* coef, const uint8_t quant[3][10], int
 	return 1;
 }
 
+static int query_ongpu(ULONG op)
+{
+	ULONG q = OGPU_Query(op, OGPU_FMT_ARGB32);
+	return OGPU_ANSWER(q) != OGPU_NONE && OGPU_ONGPU(q);
+}
+
 void rdp_ogpu_prog_install(void)
 {
 	struct rdp_prog_accel a;
@@ -119,16 +134,17 @@ void rdp_ogpu_prog_install(void)
 		OpenGPUBase = OpenLibrary((CONST_STRPTR)OPENGPU_NAME, OPENGPU_VERSION);
 	if (!OpenGPUBase)
 		return;
-	if (OGPU_ANSWER(OGPU_Query(OGPU_OP_RLGR_DEC, OGPU_FMT_ARGB32)) != OGPU_NONE)
+	/* Prefer a real GPU driver (ONGPU). The library CPU core answers FULL
+	 * without that bit; using Submit there is the same maths plus overhead. */
+	if (query_ongpu(OGPU_OP_RLGR_DEC))
 		s_ready |= 1;
-	if (OGPU_ANSWER(OGPU_Query(OGPU_OP_RFX_TILE, OGPU_FMT_ARGB32)) != OGPU_NONE &&
-	    OGPU_ANSWER(OGPU_Query(OGPU_OP_RFX_YCBCR, OGPU_FMT_ARGB32)) != OGPU_NONE)
+	if (query_ongpu(OGPU_OP_RFX_TILE) && query_ongpu(OGPU_OP_RFX_YCBCR))
 		s_ready |= 2;
 	if (!s_ready)
 		return;
 	memset(&a, 0, sizeof(a));
 	if (s_ready & 1)
-		a.rlgr = rlgr3;
+		a.rlgr = rlgr1;
 	if (s_ready & 2)
 		a.tile = tile;
 	rdp_progressive_set_accel(&a);

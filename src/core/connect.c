@@ -5,6 +5,7 @@
 #include "connect.h"
 #include "mcs.h"
 #include "amipr.h"
+#include "klid.h"
 
 #include <string.h>
 
@@ -23,7 +24,11 @@ void rdp_settings_default(struct rdp_settings* s)
 	s->height = 600;
 	s->depth = 16;
 	s->timeout_us = 15000000;
-	s->keyboard_layout = amipr_keyboard_layout();
+	/* the keymap the keys really follow, the locale's country only when
+	 * the keymap is not one klid.c knows (review 2 N7) */
+	s->keyboard_layout = rdp_klid_from_keymap(amipr_keymap_name());
+	if (!s->keyboard_layout)
+		s->keyboard_layout = amipr_keyboard_layout();
 	s->timezone_bias = -amipr_utc_offset_minutes();
 	s->timezone_bias_set = 1;
 }

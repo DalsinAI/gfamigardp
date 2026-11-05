@@ -10,6 +10,9 @@
 
 #include <libraries/locale.h>
 #include <proto/locale.h>
+#include <devices/keymap.h>
+#include <proto/keymap.h>
+#include <string.h>
 
 uint64_t amipr_monotonic_us(void)
 {
@@ -157,3 +160,35 @@ uint32_t amipr_keyboard_layout(void)
 	return 0x00000409;
 }
 
+const char* amipr_keymap_name(void)
+{
+	/* keymap.library's default keymap is the kn_KeyMap of a KeyMapNode
+	 * on keymap.resource's list; its node's name is the keymap's
+	 * (review 2 N7). Looked for, not assumed: "" when it is not there. */
+	static char name[32];
+	struct Library* KeymapBase;
+	struct KeyMapResource* kr;
+	struct KeyMap* km;
+	struct Node* n;
+
+	name[0] = 0;
+	KeymapBase = OpenLibrary((CONST_STRPTR) "keymap.library", 37);
+	if (!KeymapBase)
+		return name;
+	km = AskKeyMapDefault();
+	kr = (struct KeyMapResource*)OpenResource((CONST_STRPTR) "keymap.resource");
+	if (km && kr)
+	{
+		Forbid();
+		for (n = kr->kr_List.lh_Head; n->ln_Succ; n = n->ln_Succ)
+			if (&((struct KeyMapNode*)n)->kn_KeyMap == km)
+			{
+				if (n->ln_Name)
+					strncpy(name, (const char*)n->ln_Name, sizeof(name) - 1);
+				break;
+			}
+		Permit();
+	}
+	CloseLibrary(KeymapBase);
+	return name;
+}

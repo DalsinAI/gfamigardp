@@ -381,6 +381,105 @@ static void test_slots_reused(void)
 	rdp_dynvc_free(&d);
 }
 
+/* a CHANNEL_PDU_HEADER chunk: length, flags, payload */
+static size_t vc_chunk(uint8_t* out, uint32_t total, uint32_t flags, const uint8_t* payload, size_t len)
+{
+	int i;
+	for (i = 0; i < 4; i++)
+	{
+		out[i] = (uint8_t)(total >> (8 * i));
+		out[4 + i] = (uint8_t)(flags >> (8 * i));
+	}
+	if (len)
+		memcpy(out + 8, payload, len);
+	return 8 + len;
+}
+
+/* review 2 N5: a static channel message bigger than RDP_VC_MAX_MESSAGE is
+ * read past and dropped, not allocated, and the next one comes through */
+static void test_vc_oversize_dropped(void)
+{
+	struct rdp_vc_rx r;
+	uint8_t c[64];
+	size_t n;
+
+	rdp_vc_rx_init(&r);
+	n = vc_chunk(c, 0xFFFFFFF0u, RDP_VC_FLAG_FIRST, (const uint8_t*)"0123456789", 10);
+	CHECK(rdp_vc_rx_feed(&r, c, n) == 0, "4 GB FIRST: no error");
+	CHECK(r.buf == NULL && r.size == 0, "nothing allocated (%lu)", (unsigned long)r.size);
+	n = vc_chunk(c, 0xFFFFFFF0u, 0, (const uint8_t*)"abcdefghij", 10);
+	CHECK(rdp_vc_rx_feed(&r, c, n) == 0, "middle chunk");
+	n = vc_chunk(c, 0xFFFFFFF0u, RDP_VC_FLAG_LAST, (const uint8_t*)"xyz", 3);
+	CHECK(rdp_vc_rx_feed(&r, c, n) == 0, "LAST: dropped, not delivered");
+	CHECK(r.dropped == 1 && !r.active && r.size == 0, "dropped %u", (unsigned)r.dropped);
+	n = vc_chunk(c, (uint32_t)RDP_VC_MAX_MESSAGE + 1, RDP_VC_FLAG_FIRST | RDP_VC_FLAG_LAST, (const uint8_t*)"x", 1);
+	CHECK(rdp_vc_rx_feed(&r, c, n) < 0 || r.dropped == 2, "limit + 1 refused");
+	CHECK(r.size == 0, "limit + 1 not allocated");
+	n = vc_chunk(c, 5, RDP_VC_FLAG_FIRST | RDP_VC_FLAG_LAST, (const uint8_t*)"after", 5);
+	CHECK(rdp_vc_rx_feed(&r, c, n) == 1 && r.have == 5 && !memcmp(r.buf, "after", 5), "next message whole");
+	rdp_vc_rx_free(&r);
+}
+
+/* review 2 N5: a DVC DATA_FIRST naming more than RDP_VC_MAX_MESSAGE is
+ * read past and dropped; the channel and the session go on */
+static void test_dvc_oversize_dropped(void)
+{
+	struct rdp_dynvc d;
+	const char* name = "Microsoft::Windows::RDS::Graphics";
+	uint8_t pdu[64];
+	size_t pos;
+
+	reset_cb();
+	rdp_dynvc_init(&d, capture_send, NULL);
+	rdp_dynvc_listen(&d, name, on_create, on_data, on_close, NULL);
+	{ uint8_t caps[] = { 0x50, 0x00, 0x01, 0x00 }; feed_whole(&d, caps, 4); }
+	CHECK(create_status(&d, 4, name) == 0, "create");
+	/* DATA_FIRST, 4-byte Len (lenbits 2): 0xFFFFFFFF, 3 bytes now */
+	pos = 0;
+	pdu[pos++] = 0x28; /* cbid=0 lenbits=2 cmd=2 */
+	pdu[pos++] = 4;
+	pdu[pos++] = 0xFF; pdu[pos++] = 0xFF; pdu[pos++] = 0xFF; pdu[pos++] = 0xFF;
+	memcpy(pdu + pos, "abc", 3); pos += 3;
+	CHECK(feed_whole(&d, pdu, pos) == 0, "4 GB DATA_FIRST: no error");
+	CHECK(rdp_dynvc_find(&d, 4) && rdp_dynvc_find(&d, 4)->asm_buf == NULL, "nothing allocated");
+	pos = 0;
+	pdu[pos++] = 0x30; pdu[pos++] = 4;
+	memcpy(pdu + pos, "defg", 4); pos += 4;
+	CHECK(feed_whole(&d, pdu, pos) == 0, "DATA after it: read past");
+	CHECK(got_data_len == 0 && d.data_msgs == 0, "nothing delivered");
+	/* just over the limit, finished: dropped, and the channel still works */
+	pos = 0;
+	pdu[pos++] = 0x28; pdu[pos++] = 4;
+	{
+		uint32_t t = (uint32_t)RDP_VC_MAX_MESSAGE + 1;
+		pdu[pos++] = (uint8_t)t; pdu[pos++] = (uint8_t)(t >> 8); pdu[pos++] = (uint8_t)(t >> 16); pdu[pos++] = (uint8_t)(t >> 24);
+	}
+	CHECK(feed_whole(&d, pdu, pos) == 0, "limit + 1: no error");
+	{
+		/* the rest of it, in DATA PDUs of 2000 bytes */
+		static uint8_t big[2002];
+		size_t left = (size_t)RDP_VC_MAX_MESSAGE + 1;
+		int ok = 1;
+		uint8_t vc[2100];
+		big[0] = 0x30; big[1] = 4;
+		while (left && ok)
+		{
+			size_t k = left > 2000 ? 2000 : left;
+			int n = rdp_vc_build(vc, sizeof(vc), big, 2 + k, RDP_VC_FLAG_FIRST | RDP_VC_FLAG_LAST);
+			ok = n > 0 && rdp_dynvc_input(&d, vc, (size_t)n) == 0;
+			left -= k;
+		}
+		CHECK(ok, "the rest read past");
+	}
+	CHECK(d.dropped == 1 && d.data_msgs == 0, "dropped %u", (unsigned)d.dropped);
+	pos = 0;
+	pdu[pos++] = 0x30; pdu[pos++] = 4;
+	memcpy(pdu + pos, "ok", 2); pos += 2;
+	CHECK(feed_whole(&d, pdu, pos) == 0, "next message");
+	CHECK(got_data_len == 2 && !memcmp(got_data, "ok", 2) && d.data_msgs == 1, "delivered after the drop");
+	rdp_dynvc_free(&d);
+}
+
 int main(void)
 {
 	test_vc_reassembly();
@@ -395,6 +494,8 @@ int main(void)
 	test_softsync();
 	test_compressed_rejected();
 	test_slots_reused();
+	test_vc_oversize_dropped();
+	test_dvc_oversize_dropped();
 	printf("drdynvc: %d passed, %d failed\n", passes, fails);
 	return fails ? 1 : 0;
 }

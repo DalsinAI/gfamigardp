@@ -243,6 +243,18 @@ static int handle_data_first(struct rdp_dynvc* d, int cbid, int lenbits,
 	ch->asm_buf = NULL;
 	ch->asm_have = 0;
 	ch->asm_total = total;
+	ch->discard = 0;
+	if (total > RDP_VC_MAX_MESSAGE)
+	{
+		/* more than the client will hold (review 2 N5): this message
+		 * is read past and dropped; the channel and session go on */
+		payload = len - pos;
+		if (payload > total)
+			return RDP_E_PROTO;
+		ch->discard = 1;
+		ch->asm_have = payload;
+		return 0;
+	}
 	if (total)
 	{
 		ch->asm_buf = (uint8_t*)malloc(total);
@@ -288,6 +300,17 @@ static int handle_data(struct rdp_dynvc* d, int cbid, const uint8_t* p, size_t l
 	}
 	if (ch->asm_have + payload > ch->asm_total)
 		return RDP_E_PROTO;
+	if (ch->discard)
+	{
+		ch->asm_have += payload;
+		if (ch->asm_have == ch->asm_total)
+		{
+			ch->discard = 0;
+			ch->asm_have = ch->asm_total = 0;
+			d->dropped++;
+		}
+		return 0;
+	}
 	if (payload && ch->asm_buf)
 		memcpy(ch->asm_buf + ch->asm_have, p + pos, payload);
 	ch->asm_have += payload;

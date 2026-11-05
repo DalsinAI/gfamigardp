@@ -57,6 +57,7 @@ struct rdp_dynvc_chan
 	char name[RDP_DYNVC_NAME_MAX];
 	uint8_t* asm_buf;        /* reassembly of DATA_FIRST + DATA */
 	size_t asm_have, asm_total;
+	int discard;             /* 1: this message is over RDP_VC_MAX_MESSAGE: read past, not kept */
 	struct rdp_dynvc_listener* listener;
 };
 
@@ -73,6 +74,7 @@ struct rdp_dynvc
 	uint32_t caps_ok;        /* 1 after CAPS response written */
 	uint32_t creates;        /* create requests seen */
 	uint32_t data_msgs;      /* complete DVC messages delivered */
+	uint32_t dropped;        /* DVC messages dropped for their size (review 2 N5) */
 };
 
 void rdp_dynvc_init(struct rdp_dynvc* d, rdp_dynvc_send_fn send, void* send_user);

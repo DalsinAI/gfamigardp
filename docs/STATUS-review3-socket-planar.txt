@@ -1,0 +1,20 @@
+STATUS — review 3: Critical socket/base, Planar, ct_shutdown, GFX (Sacredtrees / Team 6)
+
+SHAs (Sacredtrees / DalsinAI/gfamigardp main, pushed):
+- 876d221 — Critical: keep conntask bsdsocket base for session; Planar red;
+  ct_shutdown port race; GFX in-frame PDU continue. Host test_gfx 60/60.
+- 0e0f90f — Merge PR #1 (review 2 N1–N7) rebased onto main.
+- f023828 — Lab: T:gfa-session markers for GUI Critical verify (no OCR).
+
+Lab binary (lab:gfamigardp-ui only, stove j20261105T144659-ee43c8 @ f023828):
+- GFAmigaRDP sha256 4b673189bfe4ebeec0568c18af862177ea732dec9ff648e99e1bfd54cb6c961c
+
+Lab GUI Critical result (2026-11-05 Europe/London afternoon):
+- Connect via GUI password field (never CLI) to 192.168.0.195 NLA user da1ek.
+- T:gfa-session: "connected" then continuous "active frames=… pdus=…" climbing
+  past frames=148 / pdus=6800+ while Process SYS:C/GFAmigaRDP stayed up.
+- No ended/user_disc; session survived past Connected (Roadshow + ObtainSocket
+  handoff with opener base kept alive via ui_ct_shutdown after session).
+
+Deferred: clipboard / sound (per steering).
+Progressive ~18 MB @1080p still untested on real Windows output beyond this live GFX session.

@@ -94,6 +94,9 @@ static void show_session(struct sw* s, int rc)
 		if (c->error_info)
 			snprintf(line, sizeof(line), "The computer ended the session: %s (0x%08lX).",
 			         ei ? ei : "error", (unsigned long)c->error_info);
+		else if (c->deactivated_early)
+			snprintf(line, sizeof(line), "The computer ended the session after licensing, most likely as it needs the "
+			         "Graphics Pipeline (RDPGFX): GFAmigaRDP has not got it yet.");
 		else if (c->mr.disconnect_reason)
 			snprintf(line, sizeof(line), "The computer ended the session (reason %u).", c->mr.disconnect_reason - 1);
 		else

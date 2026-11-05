@@ -60,4 +60,26 @@ Real connection (connection initiation only in 0.1)
       also logs on with NLA (CredSSP over NTLMv2) and prints the result: the
       server's errorCode as an NTSTATUS name when it refuses. The password
       is never printed (but it is in the Shell's history: type it in a
-      Shell you close afterwards).
+      Shell you close afterwards). ASKPASS asks for it with nothing shown.
+  tools/RDPProbe 192.168.1.10 USER=alice ASKPASS ACTIVATE WAIT=5
+      on past licensing: Demand Active, Confirm Active, the finalization,
+      then WAIT seconds of what the computer sends, and the last PDUs in hex.
+  What the client data offers can be changed to see what a server asks of
+  it: CHANNELS=drdynvc,cliprdr (TS_UD_CS_NET), EARLY=hex (earlyCapability-
+  Flags, default 0001), DEPTHS=hex (supportedColorDepths, default 0007),
+  BPP=8|15|16|24. These are for finding out, not for use: GFAmigaRDP itself
+  offers only what it has.
+  GNOME Remote Desktop (tested 2026-11-05, NLA with HYBRID_EX) sends Deactivate
+  All and Disconnect Provider Ultimatum reason 3 (rn-user-requested) straight
+  after licensing unless the client offers the Graphics Pipeline, a 32 bpp
+  session and drdynvc together:
+      default (no channels, 0001, 0007, 16 bpp)   dropped
+      CHANNELS=drdynvc                            dropped
+      CHANNELS=drdynvc EARLY=0101                 dropped
+      EARLY=0003 DEPTHS=000F BPP=24               dropped
+      CHANNELS=drdynvc EARLY=0003 DEPTHS=000F BPP=24   dropped
+      EARLY=0103 DEPTHS=000F BPP=24               dropped
+      CHANNELS=drdynvc EARLY=0103 DEPTHS=000F BPP=24   Demand Active (14 sets,
+          1024 x 768 at 32 bpp), finalization done (Font Map), then the DYNVC
+          Capabilities Request on drdynvc, waiting for the RDPGFX channel.
+  So that server needs [MS-RDPEDYC] and [MS-RDPEGFX] in the client.

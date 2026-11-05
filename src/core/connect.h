@@ -21,6 +21,10 @@ struct rdp_settings
 	uint16_t width, height;
 	uint8_t depth;            /* 8, 15, 16, 24 */
 	int64_t timeout_us;
+	uint16_t early_caps;      /* TS_UD_CS_CORE earlyCapabilityFlags; 0: RNS_UD_CS_SUPPORT_ERRINFO_PDU only */
+	uint16_t color_depths;    /* supportedColorDepths; 0: 24, 16, 15 bpp (0x0007) */
+	const char* channels;     /* static virtual channels for TS_UD_CS_NET, comma-separated
+	                             ("drdynvc,cliprdr"); NULL or "": no TS_UD_CS_NET */
 	const char* nla_dump;     /* NULL, or a file for the NLA TSRequests in hex: the NEGOTIATE,
 	                             the CHALLENGE, the AUTHENTICATE and the server's answer to it;
 	                             never the TSCredentials (they hold the sealed password) */

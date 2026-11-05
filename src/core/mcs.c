@@ -174,6 +174,57 @@ static void utf16_fixed(struct rdp_stream* s, const char* str, size_t bytes)
 		rdp_s_u16le(s, 0);
 }
 
+/* TS_UD_CS_NET (2.2.1.3.4): the static virtual channels, from a comma-separated
+ * list of names (at most 7 characters each, 2.2.1.3.4.1); none: no block */
+static int cs_net_count(const char* list)
+{
+	int n = 0;
+	const char* p = list;
+	if (!p || !*p)
+		return 0;
+	for (;;)
+	{
+		const char* e = strchr(p, ',');
+		size_t l = e ? (size_t)(e - p) : strlen(p);
+		if (l > 0 && l < 8 && n < RDP_MCS_MAX_CHANNELS)
+			n++;
+		if (!e)
+			return n;
+		p = e + 1;
+	}
+}
+
+static void cs_net(struct rdp_stream* s, const char* list)
+{
+	int n = cs_net_count(list);
+	const char* p = list;
+	if (!n)
+		return;
+	rdp_s_u16le(s, 0xC003);
+	rdp_s_u16le(s, (uint16_t)(8 + 12 * n));
+	rdp_s_u32le(s, (uint32_t)n);
+	for (;;)
+	{
+		const char* e = strchr(p, ',');
+		size_t l = e ? (size_t)(e - p) : strlen(p), i;
+		if (l > 0 && l < 8 && n-- > 0)
+		{
+			for (i = 0; i < 8; i++)
+				rdp_s_u8(s, i < l ? (uint8_t)p[i] : 0);   /* name: ANSI, NUL-padded */
+			rdp_s_u32le(s, 0x80000000u);              /* CHANNEL_OPTION_INITIALIZED */
+		}
+		if (!e)
+			return;
+		p = e + 1;
+	}
+}
+
+static size_t client_data_len(const struct rdp_settings* set)
+{
+	int n = cs_net_count(set->channels);
+	return CS_CORE_LEN + CS_CLUSTER_LEN + CS_SECURITY_LEN + (n ? 8 + 12 * (size_t)n : 0);
+}
+
 static void client_data(struct rdp_stream* s, const struct rdp_settings* set, uint32_t selected)
 {
 	uint16_t high = set->depth == 8 ? 8 : set->depth == 15 ? 15 : set->depth == 24 ? 24 : 16;
@@ -196,8 +247,8 @@ static void client_data(struct rdp_stream* s, const struct rdp_settings* set, ui
 	rdp_s_u16le(s, 1);                   /* clientProductId */
 	rdp_s_u32le(s, 0);                   /* serialNumber */
 	rdp_s_u16le(s, high);                /* highColorDepth */
-	rdp_s_u16le(s, 0x0007);              /* supportedColorDepths: 24, 16, 15 bpp */
-	rdp_s_u16le(s, 0x0001);              /* earlyCapabilityFlags: RNS_UD_CS_SUPPORT_ERRINFO_PDU */
+	rdp_s_u16le(s, set->color_depths ? set->color_depths : 0x0007);   /* supportedColorDepths: 24, 16, 15 bpp */
+	rdp_s_u16le(s, set->early_caps ? set->early_caps : 0x0001);       /* earlyCapabilityFlags: RNS_UD_CS_SUPPORT_ERRINFO_PDU */
 	utf16_fixed(s, "", 64);              /* clientDigProductId */
 	rdp_s_u8(s, 0);                      /* connectionType (not valid: no flag) */
 	rdp_s_u8(s, 0);                      /* pad1octet */
@@ -213,10 +264,8 @@ static void client_data(struct rdp_stream* s, const struct rdp_settings* set, ui
 	rdp_s_u16le(s, CS_SECURITY_LEN);
 	rdp_s_u32le(s, 0x0000001B);          /* 40BIT, 128BIT, 56BIT, FIPS */
 	rdp_s_u32le(s, 0);                   /* extEncryptionMethods */
-	/* no TS_UD_CS_NET: no static virtual channels yet */
+	cs_net(s, set->channels);
 }
-
-#define CLIENT_DATA_LEN (CS_CORE_LEN + CS_CLUSTER_LEN + CS_SECURITY_LEN)
 
 static void domain_params(struct rdp_stream* s, const uint32_t v[8])
 {
@@ -249,7 +298,8 @@ static int send_connect_initial(struct rdp_transport* t, uint8_t* buf, const str
 {
 	struct rdp_stream s;
 	/* GCC ConnectData + ConferenceCreateRequest (T.124, 4.1.3) */
-	size_t ccrq = 12 + per_len_size(CLIENT_DATA_LEN) + CLIENT_DATA_LEN;
+	size_t cd = client_data_len(set);
+	size_t ccrq = 12 + per_len_size(cd) + cd;
 	size_t gcc = 7 + per_len_size(ccrq) + ccrq;
 	size_t body = 3 + 3 + 3 + domain_params_size(dp_target) + domain_params_size(dp_min) +
 	              domain_params_size(dp_max) + 1 + ber_len_size(gcc) + gcc;
@@ -271,7 +321,7 @@ static int send_connect_initial(struct rdp_transport* t, uint8_t* buf, const str
 	rdp_s_bytes(&s, gcc_head, sizeof(gcc_head));
 	per_len(&s, ccrq);
 	rdp_s_bytes(&s, ccrq_head, sizeof(ccrq_head));
-	per_len(&s, CLIENT_DATA_LEN);
+	per_len(&s, cd);
 	client_data(&s, set, selected);
 	return tpkt_send(t, &s);
 }

@@ -6,13 +6,17 @@
  * certificate and the logon's result. The password is never printed.
  *
  *   RDPProbe HOST/A PORT/N USER/K DOMAIN/K PASSWORD/K RDP/S TLS/S NLA/S DUMP/K
- *            ASKPASS/S ACTIVATE/S WAIT/N
+ *            ASKPASS/S ACTIVATE/S WAIT/N CHANNELS/K EARLY/K DEPTHS/K BPP/N
  * ASKPASS: the password typed at a prompt, not shown (the console in raw
  * mode), rather than on the command line. ACTIVATE: after licensing, the
  * Capabilities Exchange and finalization (session.c), then WAIT seconds
  * (default 5) of what the computer sends, counted; then a disconnect.
  * DUMP=file: the NLA exchange in hex, up to the AUTHENTICATE and the
  * server's answer (never the credentials), to check a logon offline.
+ * To find what a server wants of the client data (TS_UD_CS_CORE, CS_NET):
+ * CHANNELS=drdynvc,cliprdr the static channels offered (default none),
+ * EARLY=hex earlyCapabilityFlags (default 0001), DEPTHS=hex
+ * supportedColorDepths (default 0007), BPP=8|15|16|24 (default 16).
  * MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #include "connect.h"
@@ -27,11 +31,12 @@
 #include <proto/dos.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 static const char version[] = "$VER: RDPProbe 0.2 (04.11.2026) AmiCradle Team";
 
-#define TEMPLATE "HOST/A,PORT/N,USER/K,DOMAIN/K,PASSWORD/K,RDP/S,TLS/S,NLA/S,DUMP/K,ASKPASS/S,ACTIVATE/S,WAIT/N"
-enum { A_HOST, A_PORT, A_USER, A_DOMAIN, A_PASSWORD, A_RDP, A_TLS, A_NLA, A_DUMP, A_ASKPASS, A_ACTIVATE, A_WAIT, A_N };
+#define TEMPLATE "HOST/A,PORT/N,USER/K,DOMAIN/K,PASSWORD/K,RDP/S,TLS/S,NLA/S,DUMP/K,ASKPASS/S,ACTIVATE/S,WAIT/N,CHANNELS/K,EARLY/K,DEPTHS/K,BPP/N"
+enum { A_HOST, A_PORT, A_USER, A_DOMAIN, A_PASSWORD, A_RDP, A_TLS, A_NLA, A_DUMP, A_ASKPASS, A_ACTIVATE, A_WAIT, A_CHANNELS, A_EARLY, A_DEPTHS, A_BPP, A_N };
 
 static char pw[256];
 
@@ -107,8 +112,10 @@ static void print_conn(int rc, const struct rdp_conn* c)
 		printf("Set Error Info: 0x%08lX%s%s.\n", (unsigned long)c->error_info, ei ? " " : "", ei ? ei : "");
 	if (c->deactivated_early)
 		printf("Deactivate All before any Demand Active: the server dropped the session after licensing\n"
-		       "  (MS-RDPBCGR 1.3.1.3). Its own log says why; a server that requires the Graphics\n"
-		       "  Pipeline (RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL), 32 bpp or drdynvc ends it here.\n");
+		       "  (MS-RDPBCGR 1.3.1.3). Its own log says why. GNOME Remote Desktop does this unless the\n"
+		       "  client data has all three of the Graphics Pipeline (EARLY 0100), a 32 bpp session\n"
+		       "  (EARLY 0002, DEPTHS 0008, BPP=24) and the drdynvc channel; to check a server:\n"
+		       "  CHANNELS=drdynvc EARLY=0103 DEPTHS=000F BPP=24 (a test only: RDPGFX is not done yet).\n");
 	if (c->redirected)
 		printf("Server Redirection PDU: the server asked for a reconnection elsewhere (not followed yet).\n");
 	if (c->mr.disconnect_reason)
@@ -288,6 +295,11 @@ int main(void)
 	if (args[A_RDP] || args[A_TLS] || args[A_NLA])
 		s.protocols = (args[A_TLS] ? RDP_PROTOCOL_SSL : 0) |
 		              (args[A_NLA] ? RDP_PROTOCOL_HYBRID | RDP_PROTOCOL_HYBRID_EX : 0);
+	s.channels = (const char*)args[A_CHANNELS];
+	if (args[A_EARLY])
+		s.early_caps = (uint16_t)strtoul((const char*)args[A_EARLY], NULL, 16);
+	if (args[A_DEPTHS])
+		s.color_depths = (uint16_t)strtoul((const char*)args[A_DEPTHS], NULL, 16);
 	if (args[A_PASSWORD])
 		snprintf(pw, sizeof(pw), "%s", (const char*)args[A_PASSWORD]);
 	else if (args[A_ASKPASS])
@@ -357,7 +369,10 @@ int main(void)
 								struct rdp_mcs_result mr;
 								s.width = 1024;
 								s.height = 768;
-								s.depth = 16;
+								s.depth = args[A_BPP] ? (uint8_t)*(LONG*)args[A_BPP] : 16;
+								printf("Client data: earlyCapabilityFlags 0x%04X, supportedColorDepths 0x%04X, %u bpp, channels %s.\n",
+								       (unsigned)(s.early_caps ? s.early_caps : 1), (unsigned)(s.color_depths ? s.color_depths : 7),
+								       (unsigned)s.depth, s.channels && *s.channels ? s.channels : "none");
 								rc = rdp_mcs_connect(t, &s, cc.selected, pw, &mr);
 								wipe(pw, sizeof(pw));
 								print_mcs(rc, &mr);

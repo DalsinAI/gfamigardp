@@ -145,6 +145,13 @@ itself when no text field has the focus (src/ui/connect_win.c).
 | 7 | channels: cliprdr, rdpsnd via AHI | Medium: AHI timing on a 68040 |
 
 Other risks:
+- GNOME Remote Desktop ends the session straight after licensing (Deactivate
+  All, then Disconnect Provider Ultimatum rn-user-requested) unless the client
+  data offers RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL, a 32 bpp session and the
+  drdynvc channel, all three (measured with RDPProbe, docs/LAB.txt). It has
+  no bitmap-update path for older clients, so for it the order above changes:
+  drdynvc ([MS-RDPEDYC]) and RDPGFX ([MS-RDPEGFX]: uncompressed, planar,
+  then progressive/AVC as far as a 68040 allows) before phase 2's bitmaps.
 - gfopentls.library's TLS 1.2 cipher suites must meet what Windows
   servers offer (ECDHE-RSA-AES-GCM); checked with RDPProbe in the lab.
 - TLS handshakes with RSA-2048/3072 server keys are slow on a 68040; time

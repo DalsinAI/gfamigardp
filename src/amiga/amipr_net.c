@@ -6,8 +6,10 @@
  * interface every Amiga stack offers), not through the C library's socket
  * emulation. A base belongs to the task that opened it, so each task opens
  * its own (amipr_net_open) and keeps it with its other resources; its
- * sockets are used from that task only (ReleaseSocket()/ObtainSocket()
- * would hand one on; nothing here needs that yet).
+ * sockets are used from that task only. amipr_tcp_release() and
+ * amipr_tcp_obtain() hand one to another task (ReleaseSocket() and
+ * ObtainSocket(), bsdsocket.library v4): the connection task makes the
+ * connection, the session window then owns it.
  *
  * gethostbyname() blocks the task while the stack asks a name server: the
  * connection window shows "Looking up the host..." before it is called.
@@ -227,4 +229,24 @@ void amipr_tcp_close(int s)
 {
 	if (SocketBase && s >= 0)
 		CloseSocket(s);
+}
+
+#ifndef UNIQUE_ID
+#define UNIQUE_ID (-1)
+#endif
+
+long amipr_tcp_release(int s)
+{
+	if (!SocketBase || s < 0)
+		return -1;
+	return (long)ReleaseSocket(s, UNIQUE_ID);
+}
+
+int amipr_tcp_obtain(long id)
+{
+	LONG s;
+	if (id < 0 || amipr_net_open() != AMIPR_OK)
+		return AMIPR_ENET;
+	s = ObtainSocket(id, AF_INET, SOCK_STREAM, 0);
+	return s >= 0 ? (int)s : AMIPR_ENET;
 }

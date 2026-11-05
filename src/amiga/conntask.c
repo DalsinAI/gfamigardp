@@ -363,31 +363,44 @@ again:
 			}
 			goto fail;
 		}
-		{
-			struct ct_msg* ready = alloc_msg(CT_EVT_READY);
-			if (ready)
-			{
-				snprintf(ready->security, sizeof(ready->security), "%s, %s %s",
-				         cc.selected == RDP_PROTOCOL_SSL ? "TLS" :
-				         (cc.selected & RDP_PROTOCOL_HYBRID_EX) ? "NLA (EX)" : "NLA",
-				         amipr_tls_protocol(t->tls) == 0x0304 ? "TLS 1.3" : "TLS 1.2",
-				         amipr_tls_cipher(t->tls) ? amipr_tls_cipher(t->tls) : "");
-				strncpy(ready->host, p->params.host, sizeof(ready->host) - 1);
-				strncpy(ready->user, p->params.user, sizeof(ready->user) - 1);
-				strncpy(ready->domain, p->params.domain, sizeof(ready->domain) - 1);
-				ready->width = p->params.width;
-				ready->height = p->params.height;
-				ready->depth = p->params.depth;
-				post_ui(h, ready);
-			}
-		}
 	}
-	conn->live = 1;
 	conn->selected = cc.selected;
 	conn->width = p->params.width;
 	conn->height = p->params.height;
 	conn->depth = p->params.depth;
 	conn->keyboard_layout = s.keyboard_layout;
+	/* bsdsocket descriptors belong to the task that made them: release it
+	 * here, the session window obtains it (amipr_tcp_obtain) */
+	{
+		struct ct_msg* ready = alloc_msg(CT_EVT_READY);
+		long id;
+		if (!ready)
+		{
+			evt_error(h, RDP_E_ARG, "Out of memory.");
+			goto fail;
+		}
+		if ((id = amipr_tcp_release(t->sock)) < 0)
+		{
+			FreeVec(ready);
+			evt_error(h, AMIPR_ENET, "The connection could not be handed to the session window.");
+			goto fail;
+		}
+		t->sock = -1;
+		conn->live = 1;
+		ready->sock_id = (int32_t)id;
+		snprintf(ready->security, sizeof(ready->security), "%s, %s %s",
+		         cc.selected == RDP_PROTOCOL_SSL ? "TLS" :
+		         (cc.selected & RDP_PROTOCOL_HYBRID_EX) ? "NLA (EX)" : "NLA",
+		         amipr_tls_protocol(t->tls) == 0x0304 ? "TLS 1.3" : "TLS 1.2",
+		         amipr_tls_cipher(t->tls) ? amipr_tls_cipher(t->tls) : "");
+		strncpy(ready->host, p->params.host, sizeof(ready->host) - 1);
+		strncpy(ready->user, p->params.user, sizeof(ready->user) - 1);
+		strncpy(ready->domain, p->params.domain, sizeof(ready->domain) - 1);
+		ready->width = p->params.width;
+		ready->height = p->params.height;
+		ready->depth = p->params.depth;
+		post_ui(h, ready);
+	}
 	/* Hand the live connection to the UI/session window; do not close it. */
 	amipr_set_abort(0, NULL, NULL);
 	wipe(p->password, sizeof(p->password));

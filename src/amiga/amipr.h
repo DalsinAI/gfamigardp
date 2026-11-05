@@ -165,6 +165,10 @@ int amipr_tcp_connect(const char* host, uint16_t port, int64_t timeout_us);
 int amipr_tcp_send(int s, const void* buf, int len);  /* bytes, AMIPR_EAGAIN, or < 0 */
 int amipr_tcp_recv(int s, void* buf, int len);        /* bytes, 0 closed, AMIPR_EAGAIN, or < 0 */
 void amipr_tcp_close(int s);
+/* hand a socket to another task: release answers an id (< 0 failed), the
+ * other task obtains it (opening its own base) as a descriptor of its own */
+long amipr_tcp_release(int s);
+int amipr_tcp_obtain(long id);
 int amipr_net_error(void);                            /* Errno() of the last call */
 
 /* ---- memory (exec AllocVec) --------------------------------------------- */

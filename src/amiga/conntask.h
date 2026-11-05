@@ -52,6 +52,7 @@ struct ct_msg
 	char channels[64];
 	uint8_t gfx;              /* 1: decode the Graphics Pipeline (rdp_conn.gfx_enable) */
 	char security[128];
+	int32_t sock_id;          /* READY: ReleaseSocket id; the UI obtains it */
 };
 
 struct ct_handle

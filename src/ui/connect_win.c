@@ -238,11 +238,26 @@ static int ct_drain(struct cw* c)
 				c->busy = 0;
 				break;
 			case CT_EVT_READY:
-				strncpy(c->info->security, m->security, sizeof(c->info->security) - 1);
+			{
+				/* the connection task released the socket: this task obtains it */
+				int fd = amipr_tcp_obtain((long)m->sock_id);
 				c->busy = 0;
+				if (fd < 0 || !c->info->conn)
+				{
+					if (c->info->conn)
+					{
+						c->info->conn->live = 0;
+						rdp_conn_close(c->info->conn);
+					}
+					set_status(c, "Not connected: the session window could not take the connection.");
+					break;
+				}
+				c->info->conn->t.sock = fd;
+				strncpy(c->info->security, m->security, sizeof(c->info->security) - 1);
 				c->result = 1;
 				FreeVec(m);
 				return 1;
+			}
 			case CT_EVT_QUITTED:
 				c->busy = 0;
 				break;

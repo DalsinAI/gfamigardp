@@ -93,10 +93,13 @@ The connection sequence (TCP, TLS, NLA, MCS, licensing) runs on its own CreateNe
 
 ## After connecting
 
-- **Input**: fast-path input (2.2.8.1.2): scancodes from a keymap table
-  (rawkey to PC set 1 scancode, extended keys), Unicode events for
-  characters the table lacks, mouse moves and buttons, the wheel. Toolbar
-  "Ctrl-Alt-Del" sends the three scancodes.
+- **Input**: fast-path input (2.2.8.1.2, src/core/input.c): Amiga rawkey to
+  PC set-1 scancode (US/UK; LAmiga/RAmiga stay local for menus), mouse
+  moves/buttons/wheel with pan offset into remote coords, toolbar
+  Ctrl-Alt-Del (six scancode events). Pan is Alt/Ctrl+left-drag or
+  middle-drag so plain left/right go to the server. Sends never block the
+  UI: a small queue + rdp_transport_write_nb, flushed from poll / WAIT_WRITE.
+  Unicode / IME / non-Latin keymaps later.
 - **Output**: fast-path and slow-path updates (2.2.9.1):
   1. bitmap updates (2.2.9.1.1.3.1.2) uncompressed, then interleaved RLE
      and planar (src/codec);
@@ -173,7 +176,7 @@ itself when no text field has the focus (src/ui/connect_win.c).
 | 0 (done) | skeleton: amipr, TCP, X.224, TLS upgrade, the two windows, demo mode, RDPProbe, X224Test | - |
 | 1 | MCS/GCC basic settings, channel joins, Client Info, licensing's short path, Demand/Confirm Active, finalization: to the first update PDU against Windows with TLS only (NLA off on the server) | **High**: BER/PER encoding of GCC, every field length; Windows silently drops a bad Connect Initial |
 | 2 | output: uncompressed then interleaved RLE and planar bitmaps, palette, pointer; dirty-rect drawing via WritePixelArray/WriteChunkyPixels | **High**: speed on a 68040 (RLE decode and 16-to-native conversion in C first, then assembly where profiling says) |
-| 3 | input: fast-path keyboard (rawkey to scancode) and mouse | Medium: keymaps other than US/UK |
+| 3 | input: fast-path keyboard (rawkey to scancode) and mouse | Done (US/UK); Unicode/IME/other maps open |
 | 4 | NLA: MD4, RC4, HMAC-MD5, NTLMv2, SPNEGO, CredSSP v6 | **High**: byte-exact NTLMv2 and the pubKeyAuth binding; needs test vectors from [MS-NLMP] 4.2 |
 | 5 | drawing orders and caches ([MS-RDPEGDI]); gfopengpu stream | Medium: order field encodings; cache sizes in Amiga RAM |
 | 6 | full screen, reconnect, certificate trust UI, favourites polish | Low |

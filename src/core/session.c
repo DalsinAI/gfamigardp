@@ -5,6 +5,7 @@
 #include "session.h"
 #include "amipr.h"
 #include "rdpgfx.h"
+#include "input.h"
 
 #include <exec/memory.h>
 #include <proto/exec.h>
@@ -406,6 +407,7 @@ int rdp_conn_poll(struct rdp_conn* c, int max)
 	int rc = need_buf(c);
 	if (rc < 0)
 		return rc;
+	(void)rdp_conn_input_flush(c);   /* drain queued fast-path input first */
 	rdp_conn_bind_dynvc(c);
 	while (c->live && max-- > 0)
 	{
@@ -436,6 +438,78 @@ void rdp_conn_close(struct rdp_conn* c)
 		c->tx = NULL;
 		c->have = 0;
 	}
+}
+
+
+/* ---- fast-path input (never blocks the UI task) ---- */
+
+int rdp_conn_input_pending(const struct rdp_conn* c)
+{
+	return c && c->in_q_len > 0;
+}
+
+int rdp_conn_input_flush(struct rdp_conn* c)
+{
+	size_t sent = 0;
+	int rc;
+	if (!c || !c->live || !c->in_q_len)
+		return 0;
+	rc = rdp_transport_write_nb(&c->t, c->in_q, c->in_q_len, &sent);
+	if (sent > 0)
+	{
+		if (sent >= c->in_q_len)
+			c->in_q_len = 0;
+		else
+		{
+			memmove(c->in_q, c->in_q + sent, c->in_q_len - sent);
+			c->in_q_len -= sent;
+		}
+	}
+	if (rc == AMIPR_EAGAIN)
+		return 0;
+	return rc < 0 ? rc : 0;
+}
+
+static int input_queue(struct rdp_conn* c, const uint8_t* pdu, int n)
+{
+	int rc;
+	if (!c || !c->live || n <= 0)
+		return RDP_E_ARG;
+	if (c->act != RDP_ACT_ACTIVE)
+		return 0;   /* not ready for input yet; ignore quietly */
+	(void)rdp_conn_input_flush(c);
+	if (c->in_q_len + (size_t)n > sizeof(c->in_q))
+	{
+		c->in_drop++;
+		return 0;
+	}
+	memcpy(c->in_q + c->in_q_len, pdu, (size_t)n);
+	c->in_q_len += (size_t)n;
+	rc = rdp_conn_input_flush(c);
+	if (rc >= 0 && c->in_q_len == 0)
+		c->in_sent++;
+	return rc;
+}
+
+int rdp_conn_input_key(struct rdp_conn* c, uint8_t scancode, int extended, int release)
+{
+	uint8_t pdu[16];
+	int n = rdp_fp_input_key(pdu, sizeof(pdu), scancode, extended, release);
+	return n < 0 ? n : input_queue(c, pdu, n);
+}
+
+int rdp_conn_input_mouse(struct rdp_conn* c, uint16_t ptr_flags, uint16_t x, uint16_t y)
+{
+	uint8_t pdu[16];
+	int n = rdp_fp_input_mouse(pdu, sizeof(pdu), ptr_flags, x, y);
+	return n < 0 ? n : input_queue(c, pdu, n);
+}
+
+int rdp_conn_input_cad(struct rdp_conn* c)
+{
+	uint8_t pdu[64];
+	int n = rdp_fp_input_cad(pdu, sizeof(pdu));
+	return n < 0 ? n : input_queue(c, pdu, n);
 }
 
 const char* rdp_act_name(int act)

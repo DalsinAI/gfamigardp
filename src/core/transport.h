@@ -39,8 +39,12 @@ int rdp_transport_read_some(struct rdp_transport* t, void* buf, size_t len);
 /* bytes TLS has decrypted and holds (a WaitSelect on the socket does not
  * see them) */
 int rdp_transport_pending(struct rdp_transport* t);
-/* all len bytes, or < 0 */
+/* all len bytes, or < 0 (waits on the socket when it would block) */
 int rdp_transport_write(struct rdp_transport* t, const void* buf, size_t len);
+/* Try to write without waiting. 0 when all of len went; AMIPR_EAGAIN when
+ * none or some did (caller must keep the remainder); other < 0 on error.
+ * *sent is how many bytes left the call (0..len). */
+int rdp_transport_write_nb(struct rdp_transport* t, const void* buf, size_t len, size_t* sent);
 /* exactly len bytes, or < 0 (AMIPR_ECLOSED at the end of the stream) */
 int rdp_transport_read_full(struct rdp_transport* t, void* buf, size_t len);
 /* one TPKT packet, header included: its length, or < 0 */

@@ -1,0 +1,25 @@
+GFAmigaRDP — session input (Sacredtrees), 2026-11-05 Europe/London
+
+Continues from tip 10ce454 / docs 55e7dcd.
+
+What works
+- Fast-path Input Event PDU (MS-RDPBCGR 2.2.8.1.2), ENCRYPTION_LEVEL_NONE.
+- Mouse move / left / right in the desktop band; coords = window + pan (ox/oy).
+- Wheel via rawkey 0x7A/0x7B → PTRFLAGS_WHEEL.
+- Keyboard: Amiga rawkey → PC set-1 (letters, digits, F1–F10, arrows,
+  Esc/Tab/Return/BSP/Del, Shift/Ctrl/Alt). LAmiga/RAmiga unmapped (menus).
+- Ctrl-Alt-Del toolbar/menu sends Ctrl+Alt+Del down/up.
+- Pan unchanged: Alt/Ctrl+left-drag or middle-drag (middle is pan-only).
+- Non-blocking: in_q[512] + write_nb; poll flushes; wait OR WRITE when pending.
+
+Host tests
+- test_input: 20 passed (PDU layout, CAD, rawkey map).
+
+Gaps
+- Unicode / dead keys / IME / Japanese and other KLIDs.
+- Full numeric keypad map; Pause/Break; some international keys.
+- Middle button never reaches the server (reserved for pan).
+- No live RDP smoke (password not on CLI).
+- Pointer shape / relative mouse later.
+
+Lab / stove filled after deploy.

@@ -11,6 +11,7 @@
 #include "session.h"
 #include "amipr.h"
 #include "rdpgfx.h"
+#include "input.h"
 
 #include <exec/types.h>
 #include <intuition/intuition.h>
@@ -178,6 +179,61 @@ static void show_session(struct sw* s, int rc)
 	show_mode(s);
 }
 
+
+/* Remote desktop coords from a window mouse position (pan offset). */
+static void remote_xy(struct sw* s, int mx, int my, uint16_t* rx, uint16_t* ry)
+{
+	int bx, by, iw, ih, x, y;
+	band(s, &bx, &by, &iw, &ih);
+	x = mx - bx + s->view_ox;
+	y = my - by + s->view_oy;
+	if (x < 0) x = 0;
+	if (y < 0) y = 0;
+	if (x > 65535) x = 65535;
+	if (y > 65535) y = 65535;
+	*rx = (uint16_t)x;
+	*ry = (uint16_t)y;
+}
+
+static int in_desktop_band(struct sw* s, int mx, int my)
+{
+	int bx, by, iw, ih;
+	band(s, &bx, &by, &iw, &ih);
+	return mx >= bx && mx < bx + iw && my >= by && my < by + ih;
+}
+
+/* Send mouse to the server when the session is live and not panning. */
+static void send_mouse(struct sw* s, uint16_t flags, int mx, int my)
+{
+	uint16_t rx, ry;
+	if (!s->conn || !s->conn->live || s->conn->act != RDP_ACT_ACTIVE || s->info->demo)
+		return;
+	remote_xy(s, mx, my, &rx, &ry);
+	(void)rdp_conn_input_mouse(s->conn, flags, rx, ry);
+}
+
+static void send_rawkey(struct sw* s, UWORD code)
+{
+	uint8_t scan;
+	int ext, release;
+	if (!s->conn || !s->conn->live || s->conn->act != RDP_ACT_ACTIVE || s->info->demo)
+		return;
+	release = (code & IECODE_UP_PREFIX) != 0;
+	code = (UWORD)(code & ~IECODE_UP_PREFIX);
+	/* Wheel as mouse wheel events (olui uses 0x7A/0x7B). */
+	if (code == 0x7A || code == 0x7B)
+	{
+		uint16_t flags = RDP_PTR_WHEEL | 0x0078; /* one notch */
+		if (code == 0x7B)
+			flags |= RDP_PTR_WHEEL_NEG;
+		(void)rdp_conn_input_mouse(s->conn, flags, 0, 0);
+		return;
+	}
+	if (!rdp_rawkey_to_scan(code, &scan, &ext))
+		return;   /* LAmiga/RAmiga and unmapped keys stay local */
+	(void)rdp_conn_input_key(s->conn, scan, ext, release);
+}
+
 /* reads what the computer sent, without waiting; ends the connection when it ended */
 static void poll_session(struct sw* s)
 {
@@ -197,8 +253,15 @@ static void action(struct sw* s, int what)
 		case M_DISC: s->result = 1; break;
 		case M_QUIT: s->result = 0; break;
 		case M_CAD:
-			status(s, s->info->demo ? "Demo: Ctrl-Alt-Del would go to the computer now." :
-			                          "Ctrl-Alt-Del goes to the computer once input is written.");
+			if (s->info->demo)
+				status(s, "Demo: Ctrl-Alt-Del would go to the computer now.");
+			else if (s->conn && s->conn->live && s->conn->act == RDP_ACT_ACTIVE)
+			{
+				(void)rdp_conn_input_cad(s->conn);
+				status(s, "Ctrl-Alt-Del sent to the computer.");
+			}
+			else
+				status(s, "Ctrl-Alt-Del waits until the session is active.");
 			break;
 		case M_FULL: status(s, "Full screen comes with the session's own screen (roadmap phase 4)."); break;
 		case M_ABOUT: ui_about(s->win); break;
@@ -226,7 +289,7 @@ static void on_tb(olui* ui, const olui_event* ev, void* data)
 	if (!strcmp(ev->id, "disc")) action(s, M_DISC);
 	else if (!strcmp(ev->id, "cad")) action(s, M_CAD);
 	else if (!strcmp(ev->id, "full")) action(s, M_FULL);
-	else if (!strcmp(ev->id, "keys")) status(s, "Keys: Amiga-key menus stay local. Alt/Ctrl-drag or middle-drag pans; Amiga-H homes.");
+	else if (!strcmp(ev->id, "keys")) status(s, "Keys go to the computer. Alt/Ctrl-drag or middle-drag pans; Amiga menus stay local.");
 	else if (!strcmp(ev->id, "home")) pan_home(s);
 }
 
@@ -400,6 +463,7 @@ int session_window(struct app* app, const struct session_info* info)
 		WA_DragBar, TRUE, WA_DepthGadget, TRUE, WA_CloseGadget, TRUE, WA_SizeGadget, TRUE,
 		WA_SizeBBottom, TRUE,
 		WA_Activate, TRUE, WA_SimpleRefresh, TRUE, WA_ReportMouse, TRUE, WA_NewLookMenus, TRUE,
+		WA_RMBTrap, TRUE,   /* right-click is remote MENUDOWN, not the Intuition menu */
 		WA_IDCMP, olui_amiga_idcmp() | IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS | IDCMP_MOUSEMOVE, TAG_DONE);
 	if (!s.win)
 		return 1;
@@ -414,8 +478,8 @@ int session_window(struct app* app, const struct session_info* info)
 		snprintf(line, sizeof(line), "%s%s%s", info->user, info->user[0] ? " on " : "", info->host);
 		olui_set_text(s.tb, olui_find(s.tb, "where"), line);
 		show_mode(&s);
-		status(&s, info->demo ? "Demo: Alt/Ctrl-drag or middle-drag pans; Amiga-H homes. Amiga-D disconnects." :
-		                        "Connected. Alt/Ctrl-drag or middle-drag pans; Amiga-H homes.");
+		status(&s, info->demo ? "Demo: keys/mouse stay local. Alt/Ctrl or middle-drag pans; Amiga-H homes." :
+		                        "Connected. Keys and mouse go to the computer; Alt/Ctrl or middle-drag pans.");
 		/* both strips need library 11; the static libolui always has them */
 		/* the strips first: olui_amiga_layout draws all it has, the whole window
 		 * when it has no strip yet (and the status bar's row went to the top) */
@@ -460,11 +524,13 @@ int session_window(struct app* app, const struct session_info* info)
 					timeout = BLIT_US;   /* the dirty rectangles held back */
 				it.fd = s.conn->t.sock;
 				it.events = AMIPR_WAIT_READ;
+				if (rdp_conn_input_pending(s.conn))
+					it.events |= AMIPR_WAIT_WRITE;
 				it.revents = 0;
 				sync_view(&s);   /* Progressive view-tile skip follows the pan */
 				rc = amipr_wait_signals(&it, 1, timeout, &sigs);
 				sig = sigs;
-				if (rc != 0 || timeout == 0)
+				if (rc != 0 || timeout == 0 || (it.revents & AMIPR_WAIT_WRITE))
 					poll_session(&s);
 				/* the desktop: what the frames changed, at most once a
 				 * frame; while more waits to be read it can wait too */
@@ -525,13 +591,10 @@ int session_window(struct app* app, const struct session_info* info)
 				}
 				else if (cls == IDCMP_MOUSEBUTTONS)
 				{
-					int bx, by, iw, ih;
-					int in_band, pan_btn;
-					band(&s, &bx, &by, &iw, &ih);
-					in_band = (int)mx >= bx && (int)mx < bx + iw &&
-					          (int)my >= by && (int)my < by + ih;
-					/* Plain left-drag stays free for remote mouse later.
-					 * Pan: middle-drag, or Alt/Ctrl + left-drag. */
+					int in_band = in_desktop_band(&s, (int)mx, (int)my);
+					int pan_btn;
+					/* Pan: middle-drag, or Alt/Ctrl + left-drag. Plain left
+					 * (and right) go to the remote desk. */
 					pan_btn = (code == MIDDLEDOWN) ||
 					          (code == SELECTDOWN &&
 					           (qual & (IEQUALIFIER_LALT | IEQUALIFIER_RALT | IEQUALIFIER_CONTROL)));
@@ -542,16 +605,49 @@ int session_window(struct app* app, const struct session_info* info)
 						s.pan_my = (int)my;
 					}
 					else if (code == SELECTUP || code == MIDDLEUP || code == MENUUP)
-						s.panning = 0;
+					{
+						if (s.panning)
+							s.panning = 0;
+						else if (in_band && !s.info->demo)
+						{
+							uint16_t f = 0;
+							if (code == SELECTUP) f = RDP_PTR_BUTTON1;
+							else if (code == MENUUP) f = RDP_PTR_BUTTON2;
+							else if (code == MIDDLEUP) f = RDP_PTR_BUTTON3;
+							if (f)
+								send_mouse(&s, f, (int)mx, (int)my); /* up: no DOWN bit */
+						}
+					}
+					else if (in_band && !s.panning && !s.info->demo)
+					{
+						uint16_t f = RDP_PTR_DOWN;
+						if (code == SELECTDOWN) f |= RDP_PTR_BUTTON1;
+						else if (code == MENUDOWN) f |= RDP_PTR_BUTTON2;
+						else if (code == MIDDLEDOWN) f |= RDP_PTR_BUTTON3;
+						else f = 0;
+						if (f)
+							send_mouse(&s, f, (int)mx, (int)my);
+					}
 				}
-				else if (cls == IDCMP_MOUSEMOVE && s.panning)
+				else if (cls == IDCMP_MOUSEMOVE)
 				{
-					int dx = s.pan_mx - (int)mx;
-					int dy = s.pan_my - (int)my;
-					s.pan_mx = (int)mx;
-					s.pan_my = (int)my;
-					if (dx || dy)
-						pan_by(&s, dx, dy);
+					if (s.panning)
+					{
+						int dx = s.pan_mx - (int)mx;
+						int dy = s.pan_my - (int)my;
+						s.pan_mx = (int)mx;
+						s.pan_my = (int)my;
+						if (dx || dy)
+							pan_by(&s, dx, dy);
+					}
+					else if (in_desktop_band(&s, (int)mx, (int)my) && !s.info->demo)
+						send_mouse(&s, RDP_PTR_MOVE, (int)mx, (int)my);
+				}
+				else if (cls == IDCMP_RAWKEY && r1 == OLUI_AMIGA_NONE && r2 == OLUI_AMIGA_NONE)
+				{
+					/* Keys: Amiga menus keep L/R Amiga; the rest go remote
+					 * when no strip widget has focus (KEYS_FOCUS). */
+					send_rawkey(&s, code);
 				}
 			}
 			olui_amiga_draw(s.atb);

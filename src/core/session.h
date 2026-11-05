@@ -69,6 +69,11 @@ struct rdp_conn
 	uint8_t* buf;                /* 64 KiB: what came, a PDU and the start of the next */
 	size_t have;                 /* bytes of it read and not acted on yet */
 	uint8_t* tx;                 /* 4 KiB after it, for what the client sends */
+	/* outbound fast-path input: queued when the socket would block the UI */
+	uint8_t in_q[512];
+	size_t in_q_len;
+	uint32_t in_sent;            /* PDUs written */
+	uint32_t in_drop;            /* events dropped (queue full) */
 	/* the last few PDUs read, for RDPProbe's trace */
 	struct
 	{
@@ -103,5 +108,14 @@ void rdp_conn_close(struct rdp_conn* c);
 const char* rdp_act_name(int act);
 /* [MS-RDPBCGR] 2.2.5.1.1 errorInfo, in words, or NULL */
 const char* rdp_error_info_text(uint32_t code);
+
+/* Fast-path input ([MS-RDPBCGR] 2.2.8.1.2). Never waits on the socket: a
+ * full queue or EAGAIN queues bytes and returns 0; call flush again from
+ * the poll loop (and wait WRITE when rdp_conn_input_pending). */
+int rdp_conn_input_pending(const struct rdp_conn* c);
+int rdp_conn_input_flush(struct rdp_conn* c);
+int rdp_conn_input_key(struct rdp_conn* c, uint8_t scancode, int extended, int release);
+int rdp_conn_input_mouse(struct rdp_conn* c, uint16_t ptr_flags, uint16_t x, uint16_t y);
+int rdp_conn_input_cad(struct rdp_conn* c);
 
 #endif

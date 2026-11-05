@@ -147,6 +147,33 @@ int rdp_transport_write(struct rdp_transport* t, const void* buf, size_t len)
 	return 0;
 }
 
+int rdp_transport_write_nb(struct rdp_transport* t, const void* buf, size_t len, size_t* sent)
+{
+	const uint8_t* p = buf;
+	size_t did = 0;
+	if (sent)
+		*sent = 0;
+	while (len > 0)
+	{
+		int chunk = len > 0x4000 ? 0x4000 : (int)len;
+		int n = io_once(t, 1, (void*)p, chunk);
+		if (n == AMIPR_EAGAIN)
+		{
+			if (sent)
+				*sent = did;
+			return AMIPR_EAGAIN;
+		}
+		if (n <= 0)
+			return n < 0 ? n : AMIPR_ECLOSED;
+		p += n;
+		len -= (size_t)n;
+		did += (size_t)n;
+	}
+	if (sent)
+		*sent = did;
+	return 0;
+}
+
 int rdp_transport_read_full(struct rdp_transport* t, void* buf, size_t len)
 {
 	uint8_t* p = buf;

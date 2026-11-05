@@ -17,8 +17,8 @@
 #include <gfopengpu/gfopengpu.h>
 #include <gfopengpu/stream.h>
 
-/* Defined in desktop.c so one OpenLibrary owns the base. */
-extern struct Library* OpenGPUBase;
+/* Shared with desktop.c (dirty blit); one OpenLibrary owns the base. */
+struct Library* OpenGPUBase;
 
 #include <proto/gfopengpu.h>
 

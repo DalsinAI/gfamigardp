@@ -33,7 +33,7 @@
 /* cybergraphics.library by its vectors (interface facts from its
  * autodoc): WritePixelArray -126, GetCyberMapAttr -96 */
 static struct Library* CyberGfxBase;
-struct Library* OpenGPUBase; /* also used by ogpu_yuv.c */
+extern struct Library* OpenGPUBase; /* defined in ogpu_yuv.c */
 #define CGX_WPA(src, sx, sy, mod, rp, dx, dy, w, h, fmt) \
 	LP10(0x7e, ULONG, WritePixelArray, APTR, (src), a0, UWORD, (sx), d0, UWORD, (sy), d1, UWORD, (mod), d2, \
 	     struct RastPort*, (rp), a1, UWORD, (dx), d3, UWORD, (dy), d4, UWORD, (w), d5, UWORD, (h), d6, \
@@ -59,7 +59,6 @@ struct Library* OpenGPUBase; /* also used by ogpu_yuv.c */
 static int s_ogpu_pixels; /* 1: PIXELS ok for ARGB32 target */
 static int s_ogpu_copy;   /* 1: COPY ok for ARGB32 target */
 static int s_ogpu_queried; /* 1: PIXELS/COPY Query done (base may be shared with YUV) */
-static int s_ogpu_fmt;    /* OGPU_FMT_* of the locked BitMap when known */
 
 static void ogpu_ensure(void)
 {

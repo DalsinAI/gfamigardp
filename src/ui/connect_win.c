@@ -366,7 +366,18 @@ static void do_connect(struct cw* c)
 	params.height = info->height;
 	params.depth = (uint8_t)info->depth;
 	params.protocols = ui_security[s].protocols;
-	/* channels left empty: sibling owns DRDYNVC / CS_NET */
+	/* The Graphics Pipeline ([MS-RDPEGFX]) is how the desktop is drawn:
+	 * the drdynvc channel, RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL (0x0100),
+	 * a 32 bpp session (RNS_UD_CS_WANT_32BPP_SESSION 0x0002, 32 in
+	 * supportedColorDepths 0x0008, highColorDepth 24) and errinfo (0x0001).
+	 * Honest now: Uncompressed and Planar decode, the caps never offer AVC.
+	 * GFX surfaces are 32-bit whatever the depth chosen; the screen's own
+	 * depth decides how it is shown (true colour, or dithered to pens). */
+	strncpy(params.channels, "drdynvc", sizeof(params.channels) - 1);
+	params.early_caps = 0x0103;
+	params.color_depths = 0x000F;
+	params.depth = 24;
+	params.gfx = 1;
 	take_password(c, params.password, sizeof(params.password));
 	c->ct.conn = conn;
 	snprintf(line, sizeof(line), "Connecting to %s...", info->host);

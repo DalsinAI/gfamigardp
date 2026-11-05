@@ -50,6 +50,7 @@ struct ct_msg
 	uint16_t early_caps;
 	uint16_t color_depths;
 	char channels[64];
+	uint8_t gfx;              /* 1: decode the Graphics Pipeline (rdp_conn.gfx_enable) */
 	char security[128];
 };
 

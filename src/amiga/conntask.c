@@ -257,6 +257,7 @@ static void do_connect(struct ct_priv* p, struct ct_msg* req)
 again:
 	rdp_conn_close(conn);
 	rdp_conn_init(conn);
+	conn->gfx_enable = p->params.gfx;
 	t = &conn->t;
 
 	snprintf(line, sizeof(line), "Connecting to %s...", p->params.host);
@@ -574,6 +575,7 @@ int ct_connect(struct ct_handle* h, const struct ct_msg* params)
 	m->early_caps = params->early_caps;
 	m->color_depths = params->color_depths;
 	strncpy(m->channels, params->channels, sizeof(m->channels) - 1);
+	m->gfx = params->gfx;
 	return post_cmd(h, m);
 }
 

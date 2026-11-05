@@ -10,6 +10,7 @@
 #include "ui.h"
 #include "session.h"
 #include "amipr.h"
+#include "rdpgfx.h"
 
 #include <exec/types.h>
 #include <intuition/intuition.h>
@@ -51,7 +52,37 @@ struct sw
 	int result; /* -1 running, 0 quit, 1 back to the connection window */
 	int shown_act;           /* what the status bar last said, so it changes only when the session does */
 	uint32_t shown_pdus;
+	uint32_t shown_frames;
+	uint64_t last_blit;      /* amipr_monotonic_us of the last blit: at most one a frame */
+	uint8_t fb_shown;        /* 1: the desktop band shows the Graphics Output Buffer, not the pattern */
 };
+
+/* 1/30 s: dirty rectangles that come faster wait for the next one */
+#define BLIT_US 33000
+
+static const char* codec_name(uint16_t id)
+{
+	switch (id)
+	{
+		case RDPGFX_CODECID_UNCOMPRESSED: return "Uncompressed";
+		case RDPGFX_CODECID_CAVIDEO: return "RemoteFX";
+		case RDPGFX_CODECID_CLEARCODEC: return "ClearCodec";
+		case RDPGFX_CODECID_CAPROGRESSIVE: return "Progressive";
+		case RDPGFX_CODECID_PLANAR: return "Planar";
+		case RDPGFX_CODECID_ALPHA: return "Alpha";
+		default: return "another codec";
+	}
+}
+
+/* the session's Graphics Output Buffer once the server has drawn into it */
+static struct rdp_fb* session_fb(struct sw* s)
+{
+	if (!s->conn || !s->conn->gfx || !s->conn->gfx->fb.px)
+		return NULL;
+	if (!s->fb_shown && !s->conn->gfx->fb.frames && !s->conn->gfx->fb.dirty.n)
+		return NULL;
+	return &s->conn->gfx->fb;
+}
 
 static void status(struct sw* s, const char* text)
 {
@@ -84,10 +115,12 @@ static void show_session(struct sw* s, int rc)
 	const char* ei;
 	if (!c)
 		return;
-	if (c->act == s->shown_act && rc >= 0 && (c->pdus - s->shown_pdus) < 50)
+	if (c->act == s->shown_act && rc >= 0 && (c->pdus - s->shown_pdus) < 50 &&
+	    (!c->gfx || c->gfx->st.frames == s->shown_frames || (c->gfx->st.frames - s->shown_frames) < 30))
 		return;
 	s->shown_act = c->act;
 	s->shown_pdus = c->pdus;
+	s->shown_frames = c->gfx ? c->gfx->st.frames : 0;
 	ei = rdp_error_info_text(c->error_info);
 	if (c->act == RDP_ACT_ENDED || (rc < 0 && rc != AMIPR_ETIMEOUT))
 	{
@@ -102,6 +135,14 @@ static void show_session(struct sw* s, int rc)
 		else
 			snprintf(line, sizeof(line), "The session stopped (%s): %s", rdp_act_name(c->act), rdp_error_text(rc));
 	}
+	else if (c->act == RDP_ACT_ACTIVE && c->gfx && c->gfx->st.skipped_codec)
+		snprintf(line, sizeof(line), "Session active; %lu frames. Parts not drawn: the computer uses %s "
+		         "(%lu tiles), which GFAmigaRDP does not decode yet.",
+		         (unsigned long)c->gfx->st.frames, codec_name(c->gfx->st.last_skipped_codec),
+		         (unsigned long)c->gfx->st.skipped_codec);
+	else if (c->act == RDP_ACT_ACTIVE && c->gfx)
+		snprintf(line, sizeof(line), "Session active; %lu frames (Graphics Pipeline %s).",
+		         (unsigned long)c->gfx->st.frames, c->gfx->caps_ok ? "on" : "starting");
 	else if (c->act == RDP_ACT_ACTIVE)
 		snprintf(line, sizeof(line), "Session active; %lu PDUs (%lu fast-path updates). The desktop is not drawn yet.",
 		         (unsigned long)c->pdus, (unsigned long)c->fp.updates);
@@ -148,13 +189,57 @@ static void on_tb(olui* ui, const olui_event* ev, void* data)
 	else if (!strcmp(ev->id, "keys")) status(s, "Keys: every key but the Amiga keys goes to the computer.");
 }
 
-static void draw_desktop(struct sw* s)
+static void band(struct sw* s, int* x, int* y, int* iw, int* ih)
 {
 	struct Window* w = s->win;
-	int x = w->BorderLeft, y = w->BorderTop + s->tb_h;
-	int iw = w->Width - w->BorderLeft - w->BorderRight;
-	int ih = w->Height - w->BorderTop - w->BorderBottom - s->tb_h - s->sb_h;
-	desktop_draw(w, x, y, iw, ih, s->info);
+	*x = w->BorderLeft;
+	*y = w->BorderTop + s->tb_h;
+	*iw = w->Width - w->BorderLeft - w->BorderRight;
+	*ih = w->Height - w->BorderTop - w->BorderBottom - s->tb_h - s->sb_h;
+}
+
+/* all of the band: the remote desktop once it has drawn, the test pattern before */
+static void draw_desktop(struct sw* s)
+{
+	int x, y, iw, ih;
+	struct rdp_fb* fb = session_fb(s);
+	band(s, &x, &y, &iw, &ih);
+	if (fb)
+	{
+		struct rdp_dirty d;
+		rdp_fb_take_dirty(fb, &d, NULL);   /* all of it is drawn now */
+		desktop_draw_fb(s->win, x, y, iw, ih, fb);
+		s->fb_shown = 1;
+		s->last_blit = amipr_monotonic_us();
+	}
+	else
+		desktop_draw(s->win, x, y, iw, ih, s->info);
+}
+
+/* what changed since the last blit, at most once a frame (BLIT_US); 1 when
+ * some is left for later */
+static int blit_dirty(struct sw* s, int force)
+{
+	struct rdp_fb* fb = session_fb(s);
+	struct rdp_dirty d;
+	uint64_t now;
+	int x, y, iw, ih;
+	if (!fb || !fb->dirty.n)
+		return 0;
+	if (!s->fb_shown)
+	{
+		draw_desktop(s);   /* the first frame: the pattern goes */
+		return 0;
+	}
+	now = amipr_monotonic_us();
+	if (!force && now - s->last_blit < BLIT_US)
+		return 1;
+	if (rdp_fb_take_dirty(fb, &d, NULL) <= 0)
+		return 0;
+	band(s, &x, &y, &iw, &ih);
+	desktop_blit(s->win, x, y, iw, ih, fb, d.r, d.n);
+	s->last_blit = now;
+	return 0;
 }
 
 static void menu_pick(struct sw* s, UWORD code)
@@ -230,7 +315,7 @@ int session_window(struct app* app, const struct session_info* info)
 		olui_set_text(s.tb, olui_find(s.tb, "where"), line);
 		show_mode(&s);
 		status(&s, info->demo ? "Demo session: no server. Amiga-D disconnects." :
-		                        "Connected and secured. The desktop itself is not drawn yet.");
+		                        "Connected and secured. The desktop appears with the first frame.");
 		/* both strips need library 11; the static libolui always has them */
 		/* the strips first: olui_amiga_layout draws all it has, the whole window
 		 * when it has no strip yet (and the status bar's row went to the top) */
@@ -245,6 +330,7 @@ int session_window(struct app* app, const struct session_info* info)
 		 * PDU by PDU as they come, so the window answers all the while
 		 * (review M2); they get ACTIVATE_US in all */
 		uint64_t act_deadline = 0;
+		int blit_pending = 0;
 		if (s.conn)
 		{
 			status(&s, "Starting the session: waiting for Demand Active.");
@@ -270,6 +356,8 @@ int session_window(struct app* app, const struct session_info* info)
 					timeout = 0;
 				else if (s.conn->act != RDP_ACT_ACTIVE)
 					timeout = 1000000;   /* to see the activation deadline */
+				if (timeout != 0 && blit_pending)
+					timeout = BLIT_US;   /* the dirty rectangles held back */
 				it.fd = s.conn->t.sock;
 				it.events = AMIPR_WAIT_READ;
 				it.revents = 0;
@@ -277,6 +365,9 @@ int session_window(struct app* app, const struct session_info* info)
 				sig = sigs;
 				if (rc != 0 || timeout == 0)
 					poll_session(&s);
+				/* the desktop: what the frames changed, at most once a
+				 * frame; while more waits to be read it can wait too */
+				blit_pending = blit_dirty(&s, 0);
 				if (s.conn->live && s.conn->act != RDP_ACT_ACTIVE && s.conn->act != RDP_ACT_ENDED &&
 				    amipr_monotonic_us() >= act_deadline)
 				{

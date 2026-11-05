@@ -11,6 +11,7 @@
  * MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #include "ui.h"
+#include "gfx_fb.h"
 
 #include <exec/memory.h>
 #include <graphics/gfx.h>
@@ -34,6 +35,7 @@ static struct Library* CyberGfxBase;
 #define CYBRMATTR_DEPTH 0x80000007UL
 #define CYBRMATTR_ISCYBERGFX 0x80000008UL
 #define RECTFMT_RGB 0
+#define RECTFMT_ARGB 2
 
 static struct ColorMap* s_cm;
 static LONG s_pens[27];
@@ -169,4 +171,91 @@ void desktop_draw(struct Window* win, int x0, int y0, int w, int h, const struct
 	band_text(rp, x0, y0, dw, dh, W / 12 + 8, H / 10 + 30, line);
 	snprintf(line, sizeof(line), "Computer: %s", info->host);
 	band_text(rp, x0, y0, dw, dh, W / 12 + 8, H / 10 + 30 + rp->TxHeight * 2, line);
+}
+
+/* 1: the window's bitmap is true colour through cybergraphics.library */
+static int truecolour_rp(struct RastPort* rp)
+{
+	if (!CyberGfxBase)
+		CyberGfxBase = OpenLibrary((CONST_STRPTR) "cybergraphics.library", 40);
+	return CyberGfxBase && CGX_MAPATTR(rp->BitMap, CYBRMATTR_ISCYBERGFX) &&
+	       CGX_MAPATTR(rp->BitMap, CYBRMATTR_DEPTH) > 8;
+}
+
+/*
+ * The remote desktop from the Graphics Output Buffer: only the rectangles
+ * given, clipped to the band of w x h at (x0, y0). On a true-colour screen
+ * straight from fb->px with WritePixelArray RECTFMT_ARGB (0xAARRGGBB is
+ * A,R,G,B in a 68k's memory, so nothing is converted); on a palette screen
+ * row by row through the dither cube and WriteChunkyPixels.
+ */
+void desktop_blit(struct Window* win, int x0, int y0, int w, int h, const struct rdp_fb* fb,
+                  const struct rdp_rect* rects, int n)
+{
+	struct RastPort* rp = win->RPort;
+	int i, truecolour;
+	UBYTE* row = NULL;
+
+	if (w <= 0 || h <= 0 || !fb || !fb->px)
+		return;
+	truecolour = truecolour_rp(rp);
+	if (!truecolour)
+	{
+		get_pens(win->WScreen);
+		row = AllocVec((ULONG)fb->w + 16, MEMF_ANY);
+		if (!row)
+			return;
+	}
+	for (i = 0; i < n; i++)
+	{
+		int rx0 = rects[i].x0, ry0 = rects[i].y0, rx1 = rects[i].x1, ry1 = rects[i].y1, x, y;
+		if (rx1 > fb->w) rx1 = fb->w;
+		if (ry1 > fb->h) ry1 = fb->h;
+		if (rx1 > w) rx1 = w;
+		if (ry1 > h) ry1 = h;
+		if (rx0 >= rx1 || ry0 >= ry1)
+			continue;
+		if (truecolour)
+		{
+			CGX_WPA((APTR)fb->px, (UWORD)rx0, (UWORD)ry0, (UWORD)(fb->stride * 4), rp,
+			        (UWORD)(x0 + rx0), (UWORD)(y0 + ry0), (UWORD)(rx1 - rx0), (UWORD)(ry1 - ry0), RECTFMT_ARGB);
+			continue;
+		}
+		for (y = ry0; y < ry1; y++)
+		{
+			const uint32_t* src = fb->px + (size_t)y * fb->stride;
+			for (x = rx0; x < rx1; x++)
+			{
+				uint32_t c = src[x];
+				int t = bayer[y & 3][x & 3];
+				int k = q3((c >> 16) & 255, t) * 9 + q3((c >> 8) & 255, t) * 3 + q3(c & 255, t);
+				row[x - rx0] = (UBYTE)(s_pens[k] >= 0 ? s_pens[k] : -2 - s_pens[k]);
+			}
+			WriteChunkyPixels(rp, (UWORD)(x0 + rx0), (UWORD)(y0 + y), (UWORD)(x0 + rx1 - 1), (UWORD)(y0 + y),
+			                  row, rx1 - rx0);
+		}
+	}
+	if (row)
+		FreeVec(row);
+}
+
+/* All of it: the buffer where it is, the theme's background outside it */
+void desktop_draw_fb(struct Window* win, int x0, int y0, int w, int h, const struct rdp_fb* fb)
+{
+	struct RastPort* rp = win->RPort;
+	struct rdp_rect all;
+	int dw, dh;
+	if (w <= 0 || h <= 0 || !fb)
+		return;
+	dw = w < fb->w ? w : fb->w;
+	dh = h < fb->h ? h : fb->h;
+	SetAPen(rp, 0);
+	if (w > dw)
+		RectFill(rp, x0 + dw, y0, x0 + w - 1, y0 + h - 1);
+	if (h > dh)
+		RectFill(rp, x0, y0 + dh, x0 + dw - 1, y0 + h - 1);
+	all.x0 = all.y0 = 0;
+	all.x1 = (uint16_t)dw;
+	all.y1 = (uint16_t)dh;
+	desktop_blit(win, x0, y0, w, h, fb, &all, 1);
 }

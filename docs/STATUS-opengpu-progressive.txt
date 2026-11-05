@@ -1,0 +1,55 @@
+Progressive decode through OpenGPU (2026-11-05)
+===============================================
+
+Supersedes the DWT_INV-only hook (d8ee7cd) and the I420 YUV pilot
+(ogpu_yuv.c, never bit-exact).
+
+What moved into OpenGPU (gfopenrtg stream v1.10, gfopengpu.library 0.27)
+- RLGR1 entropy decode + LL3 delta sum           OGPU_OP_RLGR_DEC  0x002A
+- dequantize + inverse 5/3 DWT (Y, Cb, Cr)       OGPU_OP_RFX_TILE  0x002B
+- YCbCr -> ARGB32 (16.16, [MS-RDPRFX] 3.1.8.2.5) OGPU_OP_RFX_YCBCR 0x002C
+- (DWT_INV 0x0029 stays for callers that only want the transform)
+
+What stays in GFAmigaRDP (src/codec/progressive.c)
+- WBT block / region / tile PDU parsing, quant tables, rectangles + view clip
+- tile state (coef, sign, bitpos), sub-band diffing, first-pass merge
+- SRL + raw upgrade passes (read/write per-coefficient sign state)
+- trim / paint after pan
+
+Hooks: struct rdp_prog_accel { rlgr, tile } (progressive.h), installed by
+src/amiga/ogpu_prog.c from session_win.c. Per tile: one Submit of 3 x
+RLGR_DEC (first/simple passes), one Submit of RFX_TILE + one RFX_YCBCR per
+clipped rectangle (32 per batch; more go in follow-on batches).
+
+CPU fallback
+- gfopengpu.library missing, or OGPU_Query(RLGR_DEC / RFX_TILE + RFX_YCBCR,
+  OGPU_FMT_ARGB32) NONE (library < 0.27): accel not installed; the in-tree
+  CPU kernels run exactly as before.
+- With the library, its own CPU back end runs the ops on the 68k (the
+  software fallback now lives in the library); a driver that answers the
+  ops in supports() takes them over with no change here.
+- A Submit/Wait error other than OGPU_ERR_DATA: that hook returns 0 and the
+  step is redone on the CPU in-tree (stats.cpu_fallback counts it).
+- OGPU_ERR_DATA from RLGR_DEC = RDP_PROG_E_PROTO, as the CPU decoder says.
+
+Bit-exactness
+- gfopenrtg tests/test_rfx.c: ops vs progressive.c kernels (copied), random.
+- tools/test_prog_ogpu.sh (GFOPENRTG=checkout): whole synthetic frames
+  (simple / first / upgrade, both DWT layouts, clip + paint) decoded with
+  and without the accel: pixel-exact, stats equal (40 seeds, ~1350 tiles).
+- YCbCr's products now wrap as unsigned 32-bit in the CPU loop too (same
+  bits on the 68040; no signed-overflow UB on garbage tiles).
+
+Behaviour change (small): first_pass decodes all three components before
+touching the tile, so a malformed component no longer leaves the tile
+half-merged. Decode scratch grows by 2 x 8 KB (vals x 3) + 8 B per rect.
+
+Not yet
+- ACRTG / PiStorm ONGPU: the library's CPU core runs everything; on a
+  68040 this moves work into the library, it does not make it faster yet.
+- No live Windows / GNOME RD pixel capture through the new path yet.
+- ogpu_prog.c's own address math (px + y * w + x, OGPU_XY) is only
+  exercised on the Amiga; the host test uses an equivalent shim.
+
+Pins: gfopensdk a5977e6 (stream.h v1.10, branch team6/stream-v1.10-rfx).
+Re-pin after the SDK PR merges if it is squashed.

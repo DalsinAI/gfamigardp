@@ -326,6 +326,194 @@ static void test_compressed_rejected(void)
 	rdp_dynvc_free(&d);
 }
 
+/* review 2: Create (1-byte id) for name; the CREATE_RSP's status, or 1 when none came */
+static int32_t create_status(struct rdp_dynvc* d, uint8_t id, const char* name)
+{
+	uint8_t create[300];
+	size_t pos = 0, n = strlen(name) + 1;
+	if (n > sizeof(create) - 2)
+		return 1;
+	create[pos++] = 0x10;
+	create[pos++] = id;
+	memcpy(create + pos, name, n);
+	pos += n;
+	nsent = 0;
+	if (feed_whole(d, create, pos) < 0 || nsent != 1 || (sent[0][0] >> 4) != 1 || sent[0][1] != id)
+		return 1;
+	return (int32_t)((uint32_t)sent[0][2] | ((uint32_t)sent[0][3] << 8) | ((uint32_t)sent[0][4] << 16) | ((uint32_t)sent[0][5] << 24));
+}
+
+static void close_chan(struct rdp_dynvc* d, uint8_t id)
+{
+	uint8_t pdu[2] = { 0x40, 0 };
+	pdu[1] = id;
+	feed_whole(d, pdu, 2);
+}
+
+/* review 2 N4: a closed channel's slot is used again */
+static void test_slots_reused(void)
+{
+	struct rdp_dynvc d;
+	const char* name = "Microsoft::Windows::RDS::Graphics";
+	int i, ok = 1;
+
+	reset_cb();
+	rdp_dynvc_init(&d, capture_send, NULL);
+	rdp_dynvc_listen(&d, name, on_create, on_data, on_close, NULL);
+	{ uint8_t caps[] = { 0x50, 0x00, 0x01, 0x00 }; feed_whole(&d, caps, 4); }
+	/* 40 channels one after another, each closed before the next */
+	for (i = 1; i <= 40 && ok; i++)
+	{
+		ok = create_status(&d, (uint8_t)i, name) == 0;
+		close_chan(&d, (uint8_t)i);
+	}
+	CHECK(ok, "create %d after closes refused", i - 1);
+	CHECK(d.nchans <= 1, "slots %d", d.nchans);
+	/* 16 at once, the 17th refused; one closed, then another fits */
+	for (i = 100; i < 116 && ok; i++)
+		ok = create_status(&d, (uint8_t)i, name) == 0;
+	CHECK(ok, "16 open");
+	CHECK(create_status(&d, 116, name) == (int32_t)0x80004005L, "17th: E_FAIL");
+	close_chan(&d, 105);
+	CHECK(rdp_dynvc_find(&d, 105) == NULL, "105 closed");
+	CHECK(create_status(&d, 117, name) == 0, "a closed slot used again");
+	CHECK(rdp_dynvc_find(&d, 117) != NULL && rdp_dynvc_find(&d, 110) != NULL, "117 and 110 open");
+	rdp_dynvc_free(&d);
+}
+
+/* a CHANNEL_PDU_HEADER chunk: length, flags, payload */
+static size_t vc_chunk(uint8_t* out, uint32_t total, uint32_t flags, const uint8_t* payload, size_t len)
+{
+	int i;
+	for (i = 0; i < 4; i++)
+	{
+		out[i] = (uint8_t)(total >> (8 * i));
+		out[4 + i] = (uint8_t)(flags >> (8 * i));
+	}
+	if (len)
+		memcpy(out + 8, payload, len);
+	return 8 + len;
+}
+
+/* review 2 N5: a static channel message bigger than RDP_VC_MAX_MESSAGE is
+ * read past and dropped, not allocated, and the next one comes through */
+static void test_vc_oversize_dropped(void)
+{
+	struct rdp_vc_rx r;
+	uint8_t c[64];
+	size_t n;
+
+	rdp_vc_rx_init(&r);
+	n = vc_chunk(c, 0xFFFFFFF0u, RDP_VC_FLAG_FIRST, (const uint8_t*)"0123456789", 10);
+	CHECK(rdp_vc_rx_feed(&r, c, n) == 0, "4 GB FIRST: no error");
+	CHECK(r.buf == NULL && r.size == 0, "nothing allocated (%lu)", (unsigned long)r.size);
+	n = vc_chunk(c, 0xFFFFFFF0u, 0, (const uint8_t*)"abcdefghij", 10);
+	CHECK(rdp_vc_rx_feed(&r, c, n) == 0, "middle chunk");
+	n = vc_chunk(c, 0xFFFFFFF0u, RDP_VC_FLAG_LAST, (const uint8_t*)"xyz", 3);
+	CHECK(rdp_vc_rx_feed(&r, c, n) == 0, "LAST: dropped, not delivered");
+	CHECK(r.dropped == 1 && !r.active && r.size == 0, "dropped %u", (unsigned)r.dropped);
+	n = vc_chunk(c, (uint32_t)RDP_VC_MAX_MESSAGE + 1, RDP_VC_FLAG_FIRST | RDP_VC_FLAG_LAST, (const uint8_t*)"x", 1);
+	CHECK(rdp_vc_rx_feed(&r, c, n) < 0 || r.dropped == 2, "limit + 1 refused");
+	CHECK(r.size == 0, "limit + 1 not allocated");
+	n = vc_chunk(c, 5, RDP_VC_FLAG_FIRST | RDP_VC_FLAG_LAST, (const uint8_t*)"after", 5);
+	CHECK(rdp_vc_rx_feed(&r, c, n) == 1 && r.have == 5 && !memcmp(r.buf, "after", 5), "next message whole");
+	rdp_vc_rx_free(&r);
+}
+
+/* review 2 N5: a DVC DATA_FIRST naming more than RDP_VC_MAX_MESSAGE is
+ * read past and dropped; the channel and the session go on */
+static void test_dvc_oversize_dropped(void)
+{
+	struct rdp_dynvc d;
+	const char* name = "Microsoft::Windows::RDS::Graphics";
+	uint8_t pdu[64];
+	size_t pos;
+
+	reset_cb();
+	rdp_dynvc_init(&d, capture_send, NULL);
+	rdp_dynvc_listen(&d, name, on_create, on_data, on_close, NULL);
+	{ uint8_t caps[] = { 0x50, 0x00, 0x01, 0x00 }; feed_whole(&d, caps, 4); }
+	CHECK(create_status(&d, 4, name) == 0, "create");
+	/* DATA_FIRST, 4-byte Len (lenbits 2): 0xFFFFFFFF, 3 bytes now */
+	pos = 0;
+	pdu[pos++] = 0x28; /* cbid=0 lenbits=2 cmd=2 */
+	pdu[pos++] = 4;
+	pdu[pos++] = 0xFF; pdu[pos++] = 0xFF; pdu[pos++] = 0xFF; pdu[pos++] = 0xFF;
+	memcpy(pdu + pos, "abc", 3); pos += 3;
+	CHECK(feed_whole(&d, pdu, pos) == 0, "4 GB DATA_FIRST: no error");
+	CHECK(rdp_dynvc_find(&d, 4) && rdp_dynvc_find(&d, 4)->asm_buf == NULL, "nothing allocated");
+	pos = 0;
+	pdu[pos++] = 0x30; pdu[pos++] = 4;
+	memcpy(pdu + pos, "defg", 4); pos += 4;
+	CHECK(feed_whole(&d, pdu, pos) == 0, "DATA after it: read past");
+	CHECK(got_data_len == 0 && d.data_msgs == 0, "nothing delivered");
+	/* just over the limit, finished: dropped, and the channel still works */
+	pos = 0;
+	pdu[pos++] = 0x28; pdu[pos++] = 4;
+	{
+		uint32_t t = (uint32_t)RDP_VC_MAX_MESSAGE + 1;
+		pdu[pos++] = (uint8_t)t; pdu[pos++] = (uint8_t)(t >> 8); pdu[pos++] = (uint8_t)(t >> 16); pdu[pos++] = (uint8_t)(t >> 24);
+	}
+	CHECK(feed_whole(&d, pdu, pos) == 0, "limit + 1: no error");
+	{
+		/* the rest of it, in DATA PDUs of 2000 bytes */
+		static uint8_t big[2002];
+		size_t left = (size_t)RDP_VC_MAX_MESSAGE + 1;
+		int ok = 1;
+		uint8_t vc[2100];
+		big[0] = 0x30; big[1] = 4;
+		while (left && ok)
+		{
+			size_t k = left > 2000 ? 2000 : left;
+			int n = rdp_vc_build(vc, sizeof(vc), big, 2 + k, RDP_VC_FLAG_FIRST | RDP_VC_FLAG_LAST);
+			ok = n > 0 && rdp_dynvc_input(&d, vc, (size_t)n) == 0;
+			left -= k;
+		}
+		CHECK(ok, "the rest read past");
+	}
+	CHECK(d.dropped == 1 && d.data_msgs == 0, "dropped %u", (unsigned)d.dropped);
+	pos = 0;
+	pdu[pos++] = 0x30; pdu[pos++] = 4;
+	memcpy(pdu + pos, "ok", 2); pos += 2;
+	CHECK(feed_whole(&d, pdu, pos) == 0, "next message");
+	CHECK(got_data_len == 2 && !memcmp(got_data, "ok", 2) && d.data_msgs == 1, "delivered after the drop");
+	rdp_dynvc_free(&d);
+}
+
+/* review 2 N6: a channel name of 64 bytes or more is refused with E_FAIL
+ * for that channel only; the session and the next create go on */
+static void test_long_name_refused(void)
+{
+	struct rdp_dynvc d;
+	const char* name = "Microsoft::Windows::RDS::Graphics";
+	char longname[200];
+	uint8_t pdu[8];
+	static const int lens[] = { 64, 65, 100, 150 };
+	unsigned i;
+	int n;
+
+	reset_cb();
+	rdp_dynvc_init(&d, capture_send, NULL);
+	rdp_dynvc_listen(&d, name, on_create, on_data, on_close, NULL);
+	{ uint8_t caps[] = { 0x50, 0x00, 0x01, 0x00 }; feed_whole(&d, caps, 4); }
+	for (i = 0; i < sizeof(lens) / sizeof(lens[0]); i++)
+	{
+		n = lens[i];
+		memset(longname, 'A', sizeof(longname));
+		memcpy(longname, name, strlen(name));   /* a listener's name as its start */
+		longname[n] = 0;
+		got_create = 0;
+		CHECK(create_status(&d, (uint8_t)n, longname) == (int32_t)0x80004005L, "%d-byte name: E_FAIL", n);
+		CHECK(!got_create && rdp_dynvc_find(&d, (uint32_t)n) == NULL, "%d-byte name: not opened", n);
+	}
+	/* a name with no NUL at all is still a broken PDU */
+	pdu[0] = 0x10; pdu[1] = 9; pdu[2] = 'x'; pdu[3] = 'y';
+	CHECK(feed_whole(&d, pdu, 4) < 0, "no NUL: protocol error");
+	CHECK(create_status(&d, 5, name) == 0, "a good create after them");
+	CHECK(rdp_dynvc_find(&d, 5) != NULL, "open");
+	rdp_dynvc_free(&d);
+}
+
 int main(void)
 {
 	test_vc_reassembly();
@@ -339,6 +527,10 @@ int main(void)
 	test_send_data_fragments();
 	test_softsync();
 	test_compressed_rejected();
+	test_slots_reused();
+	test_vc_oversize_dropped();
+	test_dvc_oversize_dropped();
+	test_long_name_refused();
 	printf("drdynvc: %d passed, %d failed\n", passes, fails);
 	return fails ? 1 : 0;
 }

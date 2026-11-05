@@ -50,6 +50,8 @@ const char* amipr_timezone_name(void); /* the locale's country code, e.g. "deu",
 /* Windows keyboard layout id (KLID) from the locale's country, e.g. 0x0809 for
  * the UK; 0x0409 (US) when locale.library is missing or the country is unknown */
 uint32_t amipr_keyboard_layout(void);
+/* keymap.library's default keymap's name ("gb", "d", "usa"...), or "" */
+const char* amipr_keymap_name(void);
 void amipr_sleep_us(uint64_t us);     /* TR_ADDREQUEST on UNIT_MICROHZ; 0 just yields */
 void amipr_yield(void);
 

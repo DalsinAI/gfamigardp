@@ -7,6 +7,7 @@
 #include "markup.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 const struct ui_resolution ui_resolutions[] = {
@@ -28,7 +29,8 @@ const struct ui_security ui_security[] = {
 	/* NLA first and by default: with TLS alone the password goes to the
 	 * computer inside the Client Info PDU, so TLS is offered only when the
 	 * user picks it, and then the certificate must be trusted (review H1).
-	 * The order is the favourites' saved index: 1 stays TLS. */
+	 * The order is the favourites' saved index in format 2; a format 1
+	 * file's indices are read by ui_fav_security (review 2 N2). */
 	{ "Network Level Authentication (recommended)", 0x2 | 0x8 },   /* HYBRID, HYBRID_EX */
 	{ "TLS only (password sent inside TLS)", 0x1 },
 	{ "NLA, or TLS if the computer has no NLA", 0x1 | 0x2 | 0x8 },
@@ -36,6 +38,26 @@ const struct ui_security ui_security[] = {
 const int ui_nresolutions = sizeof(ui_resolutions) / sizeof(ui_resolutions[0]);
 const int ui_ndepths = sizeof(ui_depths) / sizeof(ui_depths[0]);
 const int ui_nsecurity = sizeof(ui_security) / sizeof(ui_security[0]);
+
+int ui_fav_format(const char* line)
+{
+	static const char h2[] = "# GFAmigaRDP favourites 2:";
+	return line && !strncmp(line, h2, sizeof(h2) - 1) ? 2 : 0;
+}
+
+int ui_fav_security(const char* saved, int format)
+{
+	int v = saved ? atoi(saved) : 0;
+	if (format >= 2)
+		return v < 0 || v >= ui_nsecurity ? 0 : v;
+	/* format 1 saved 0 "the best the computer offers", 1 TLS, 2 NLA. Its
+	 * 2 is NLA only here too, never "NLA, or TLS" (review 2 N2); its 0 is
+	 * read as NLA only as well, the default since review H1: a file with
+	 * no header cannot say whether it was written before H1 (0 the best)
+	 * or after it (0 NLA only), and NLA only is the reading that never
+	 * lets the password go out over TLS alone unasked. 1 stays TLS. */
+	return v == 1 ? 1 : 0;
+}
 
 static const char markup_head[] =
 	"<column id=main>"

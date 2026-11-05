@@ -14,7 +14,6 @@
 const char* rdp_known_hosts_path = RDP_KNOWN_HOSTS_FILE;
 
 #define MAX_LINE 400
-#define MAX_KNOWN 128
 
 static int hexval(int c)
 {
@@ -24,14 +23,49 @@ static int hexval(int c)
 	return -1;
 }
 
-/* "host:port" for the file; 0, or -1 when it does not fit or has a space */
+/* a "host:port" key as it is compared (review 2 N3): the host in lower
+ * case (DNS names are not case-sensitive) and without a trailing dot, so
+ * "Server.Example.ORG." and "server.example.org" are the same pin */
+static void norm_key(char* k)
+{
+	char* colon = strrchr(k, ':');
+	char* p;
+	for (p = k; *p; p++)
+		if (*p >= 'A' && *p <= 'Z')
+			*p = (char)(*p - 'A' + 'a');
+	if (colon && colon > k + 1 && colon[-1] == '.')
+		memmove(colon - 1, colon, strlen(colon) + 1);
+}
+
+/* "host:port" for the file, normalised; 0, or -1 when it does not fit or has a space */
 static int key(char* out, size_t size, const char* host, uint16_t port)
 {
 	int n;
 	if (!host || !*host || strpbrk(host, " \t\r\n"))
 		return -1;
 	n = snprintf(out, size, "%s:%u", host, (unsigned)port);
+	if (n <= 0 || (size_t)n >= size)
+		return -1;
+	norm_key(out);
+	return 0;
+}
+
+/* the file is rewritten as path + ".new" and renamed over it (review 2
+ * N3); a crash between taking the old one away and the rename leaves
+ * only the new one, which is read then */
+static int tmp_path(char* out, size_t size)
+{
+	int n = snprintf(out, size, "%s.new", rdp_known_hosts_path);
 	return n > 0 && (size_t)n < size ? 0 : -1;
+}
+
+static FILE* open_read(void)
+{
+	char tmp[300];
+	FILE* fh = fopen(rdp_known_hosts_path, "r");
+	if (!fh && tmp_path(tmp, sizeof(tmp)) == 0)
+		fh = fopen(tmp, "r");
+	return fh;
 }
 
 /* a line's key and fingerprint: 1, or 0 when it is not a host line */
@@ -72,11 +106,11 @@ int rdp_known_host_get(const char* host, uint16_t port, uint8_t fp[32])
 	FILE* fh;
 	if (key(want, sizeof(want), host, port) < 0)
 		return 0;
-	fh = fopen(rdp_known_hosts_path, "r");
+	fh = open_read();
 	if (!fh)
 		return 0;
 	while (fgets(line, sizeof(line), fh))
-		if (parse(line, &k, f) && !strcmp(k, want))
+		if (parse(line, &k, f) && (norm_key(k), !strcmp(k, want)))
 		{
 			memcpy(fp, f, 32);
 			found = 1;   /* the last line for it wins */
@@ -99,23 +133,23 @@ void rdp_fingerprint_text(const uint8_t fp[32], char out[96])
 
 int rdp_known_host_set(const char* host, uint16_t port, const uint8_t fp[32])
 {
-	char want[300], line[MAX_LINE], copy[MAX_LINE], *k, text[96];
+	char want[300], line[MAX_LINE], copy[MAX_LINE], *k, text[96], tmp[300];
 	char* keep = NULL;
 	size_t kept = 0, cap = 0;
 	uint8_t f[32];
 	FILE* fh;
-	int n = 0, rc = 0;
-	if (key(want, sizeof(want), host, port) < 0)
+	int rc = 0;
+	if (key(want, sizeof(want), host, port) < 0 || tmp_path(tmp, sizeof(tmp)) < 0)
 		return -1;
-	/* the other lines, as they were */
-	fh = fopen(rdp_known_hosts_path, "r");
+	/* the other lines, as they were, all of them (review 2 N3: no cap) */
+	fh = open_read();
 	if (fh)
 	{
-		while (fgets(line, sizeof(line), fh) && n < MAX_KNOWN)
+		while (fgets(line, sizeof(line), fh))
 		{
 			size_t l;
 			strcpy(copy, line);
-			if (parse(copy, &k, f) && !strcmp(k, want))
+			if (parse(copy, &k, f) && (norm_key(k), !strcmp(k, want)))
 				continue;
 			l = strlen(line);
 			if (kept + l + 2 > cap)
@@ -133,11 +167,10 @@ int rdp_known_host_set(const char* host, uint16_t port, const uint8_t fp[32])
 			kept += l;
 			if (l && line[l - 1] != '\n')
 				keep[kept++] = '\n';
-			n++;
 		}
 		fclose(fh);
 	}
-	fh = fopen(rdp_known_hosts_path, "w");
+	fh = fopen(tmp, "w");
 	if (!fh)
 	{
 		/* the drawer first (ENVARC:GFAmigaRDP) */
@@ -147,7 +180,7 @@ int rdp_known_host_set(const char* host, uint16_t port, const uint8_t fp[32])
 			memcpy(copy, rdp_known_hosts_path, slash - rdp_known_hosts_path);
 			copy[slash - rdp_known_hosts_path] = 0;
 			mkdir(copy, 0755);
-			fh = fopen(rdp_known_hosts_path, "w");
+			fh = fopen(tmp, "w");
 		}
 	}
 	if (!fh)
@@ -165,5 +198,18 @@ int rdp_known_host_set(const char* host, uint16_t port, const uint8_t fp[32])
 	if (fclose(fh) != 0)
 		rc = -1;
 	free(keep);
-	return rc;
+	if (rc < 0)
+	{
+		remove(tmp);   /* the old file stays as it was */
+		return -1;
+	}
+	/* over the old one: dos.library's Rename() will not replace a file,
+	 * so when it says no the old one goes first */
+	if (rename(tmp, rdp_known_hosts_path) != 0)
+	{
+		remove(rdp_known_hosts_path);
+		if (rename(tmp, rdp_known_hosts_path) != 0)
+			return -1;
+	}
+	return 0;
 }

@@ -121,4 +121,24 @@ int rdp_conn_input_key(struct rdp_conn* c, uint8_t scancode, int extended, int r
 int rdp_conn_input_mouse(struct rdp_conn* c, uint16_t ptr_flags, uint16_t x, uint16_t y);
 int rdp_conn_input_cad(struct rdp_conn* c);
 
+/* The activation deadline (review 2 N1): *deadline is 0 while the session
+ * is active (or ended), and is armed to now + span whenever it is not:
+ * at the start and again each time a Deactivate All takes it out of
+ * RDP_ACT_ACTIVE, so a resize or a reconnection later in the session gets
+ * a fresh span instead of a deadline long past. 1 when it has run out. */
+static inline int rdp_act_deadline_passed(int act, uint64_t now, uint64_t span, uint64_t* deadline)
+{
+	if (act == RDP_ACT_ACTIVE || act == RDP_ACT_ENDED)
+	{
+		*deadline = 0;
+		return 0;
+	}
+	if (!*deadline)
+	{
+		*deadline = now + span;
+		return 0;
+	}
+	return now >= *deadline;
+}
+
 #endif

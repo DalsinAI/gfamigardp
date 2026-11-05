@@ -18,7 +18,7 @@ void rdp_vc_rx_free(struct rdp_vc_rx* r)
 	free(r->buf);
 	r->buf = NULL;
 	r->size = r->have = r->total = 0;
-	r->active = 0;
+	r->active = r->skip = 0;
 }
 
 static int ensure(struct rdp_vc_rx* r, size_t need)
@@ -52,15 +52,33 @@ int rdp_vc_rx_feed(struct rdp_vc_rx* r, const uint8_t* data, size_t len)
 		r->have = 0;
 		r->total = total;
 		r->active = 1;
-		rc = ensure(r, total ? (size_t)total : (size_t)chunk);
-		if (rc < 0)
-			return rc;
+		r->skip = total > RDP_VC_MAX_MESSAGE;   /* review 2 N5 */
+		if (!r->skip)
+		{
+			rc = ensure(r, total ? (size_t)total : (size_t)chunk);
+			if (rc < 0)
+				return rc;
+		}
 	}
 	else if (!r->active)
 		return RDP_E_PROTO;
 
 	if (r->total && r->have + chunk > r->total)
 		return RDP_E_PROTO;
+	if (!r->skip && r->have + chunk > RDP_VC_MAX_MESSAGE)
+		r->skip = 1;   /* no length said, and it grew past the limit */
+	if (r->skip)
+	{
+		/* counted, not kept; at LAST the message is dropped */
+		r->have += chunk;
+		if (flags & RDP_VC_FLAG_LAST)
+		{
+			r->active = r->skip = 0;
+			r->have = 0;
+			r->dropped++;
+		}
+		return 0;
+	}
 	rc = ensure(r, r->have + chunk);
 	if (rc < 0)
 		return rc;

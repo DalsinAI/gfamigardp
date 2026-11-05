@@ -150,6 +150,18 @@ static int handle_caps(struct rdp_dynvc* d, const uint8_t* p, size_t len)
 	return send_raw(d, rsp, 4);
 }
 
+/* a slot for a new channel: a closed one again, or the next (review 2 N4) */
+static struct rdp_dynvc_chan* free_slot(struct rdp_dynvc* d)
+{
+	int i;
+	for (i = 0; i < d->nchans; i++)
+		if (!d->chans[i].open)
+			return &d->chans[i];
+	if (d->nchans < RDP_DYNVC_MAX_CHANNELS)
+		return &d->chans[d->nchans++];
+	return NULL;
+}
+
 static int handle_create(struct rdp_dynvc* d, int cbid, int pri, const uint8_t* p, size_t len)
 {
 	uint32_t id = 0;
@@ -167,21 +179,27 @@ static int handle_create(struct rdp_dynvc* d, int cbid, int pri, const uint8_t* 
 	d->creates++;
 	if (get_cbid(p, len, &pos, cbid, &id) < 0)
 		return RDP_E_PROTO;
-	while (pos < len && p[pos] && ni + 1 < sizeof(name))
-		name[ni++] = (char)p[pos++];
-	name[ni] = 0;
-	if (pos >= len || p[pos] != 0)
+	while (pos < len && p[pos])
+	{
+		if (ni + 1 < sizeof(name))
+			name[ni] = (char)p[pos];
+		ni++;
+		pos++;
+	}
+	if (pos >= len)
 		return RDP_E_PROTO; /* missing NUL */
 	pos++;
+	/* a name of RDP_DYNVC_NAME_MAX bytes or more is no listener's: that
+	 * channel is refused, the session goes on (review 2 N6) */
+	name[ni < sizeof(name) ? ni : 0] = 0;
 
-	L = find_listener(d, name);
-	if (!L || d->nchans >= RDP_DYNVC_MAX_CHANNELS)
+	L = ni < sizeof(name) ? find_listener(d, name) : NULL;
+	if (!L || !(ch = free_slot(d)))
 		status = (int32_t)0x80004005L; /* E_FAIL */
 	else if (L->on_create && (rc = L->on_create(d, id, name, L->user)) < 0)
 		status = (int32_t)0x80004005L;
 	else
 	{
-		ch = &d->chans[d->nchans++];
 		memset(ch, 0, sizeof(*ch));
 		ch->id = id;
 		ch->open = 1;
@@ -232,6 +250,18 @@ static int handle_data_first(struct rdp_dynvc* d, int cbid, int lenbits,
 	ch->asm_buf = NULL;
 	ch->asm_have = 0;
 	ch->asm_total = total;
+	ch->discard = 0;
+	if (total > RDP_VC_MAX_MESSAGE)
+	{
+		/* more than the client will hold (review 2 N5): this message
+		 * is read past and dropped; the channel and session go on */
+		payload = len - pos;
+		if (payload > total)
+			return RDP_E_PROTO;
+		ch->discard = 1;
+		ch->asm_have = payload;
+		return 0;
+	}
 	if (total)
 	{
 		ch->asm_buf = (uint8_t*)malloc(total);
@@ -277,6 +307,17 @@ static int handle_data(struct rdp_dynvc* d, int cbid, const uint8_t* p, size_t l
 	}
 	if (ch->asm_have + payload > ch->asm_total)
 		return RDP_E_PROTO;
+	if (ch->discard)
+	{
+		ch->asm_have += payload;
+		if (ch->asm_have == ch->asm_total)
+		{
+			ch->discard = 0;
+			ch->asm_have = ch->asm_total = 0;
+			d->dropped++;
+		}
+		return 0;
+	}
 	if (payload && ch->asm_buf)
 		memcpy(ch->asm_buf + ch->asm_have, p + pos, payload);
 	ch->asm_have += payload;

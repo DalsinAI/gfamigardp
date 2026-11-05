@@ -6,6 +6,9 @@
  * cannot check it against a CA; its fingerprint, once the user has seen
  * it and said "trust", is pinned for the next connections (amipr_tls_new),
  * and a different certificate later is refused with a warning (review H1).
+ * Hosts are compared in lower case without a trailing dot; every line is
+ * kept, and the file is rewritten beside itself and renamed over the old
+ * one, so a crash cannot lose the pins (review 2 N3).
  * MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #ifndef RDP_KNOWNHOSTS_H

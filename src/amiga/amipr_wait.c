@@ -324,6 +324,24 @@ void amipr_set_abort(uint32_t sigmask, amipr_abort_cb cb, void* user)
 	s_abort_task = cb ? FindTask(NULL) : NULL;
 }
 
+uint32_t amipr_abort_sigmask(void)
+{
+	return (s_abort_cb && s_abort_task == FindTask(NULL)) ? (uint32_t)s_abort_sigs : 0;
+}
+
+int amipr_abort_check(void)
+{
+	ULONG came;
+	int stop;
+	if (!s_abort_cb || s_in_abort || s_abort_task != FindTask(NULL))
+		return 0;
+	came = SetSignal(0, s_abort_sigs) & s_abort_sigs;
+	s_in_abort = 1;
+	stop = s_abort_cb(s_abort_user, (uint32_t)came);
+	s_in_abort = 0;
+	return stop;
+}
+
 /* extra: signals to wake on as well; *got: those that came (NULL: the
  * abort hook's, which are not handed back but given to the hook) */
 static int wait_impl(struct amipr_wait_item* items, size_t count, int64_t timeout_us, ULONG extra, ULONG* got)

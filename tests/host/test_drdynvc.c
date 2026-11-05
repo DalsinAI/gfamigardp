@@ -326,6 +326,61 @@ static void test_compressed_rejected(void)
 	rdp_dynvc_free(&d);
 }
 
+/* review 2: Create (1-byte id) for name; the CREATE_RSP's status, or 1 when none came */
+static int32_t create_status(struct rdp_dynvc* d, uint8_t id, const char* name)
+{
+	uint8_t create[300];
+	size_t pos = 0, n = strlen(name) + 1;
+	if (n > sizeof(create) - 2)
+		return 1;
+	create[pos++] = 0x10;
+	create[pos++] = id;
+	memcpy(create + pos, name, n);
+	pos += n;
+	nsent = 0;
+	if (feed_whole(d, create, pos) < 0 || nsent != 1 || (sent[0][0] >> 4) != 1 || sent[0][1] != id)
+		return 1;
+	return (int32_t)((uint32_t)sent[0][2] | ((uint32_t)sent[0][3] << 8) | ((uint32_t)sent[0][4] << 16) | ((uint32_t)sent[0][5] << 24));
+}
+
+static void close_chan(struct rdp_dynvc* d, uint8_t id)
+{
+	uint8_t pdu[2] = { 0x40, 0 };
+	pdu[1] = id;
+	feed_whole(d, pdu, 2);
+}
+
+/* review 2 N4: a closed channel's slot is used again */
+static void test_slots_reused(void)
+{
+	struct rdp_dynvc d;
+	const char* name = "Microsoft::Windows::RDS::Graphics";
+	int i, ok = 1;
+
+	reset_cb();
+	rdp_dynvc_init(&d, capture_send, NULL);
+	rdp_dynvc_listen(&d, name, on_create, on_data, on_close, NULL);
+	{ uint8_t caps[] = { 0x50, 0x00, 0x01, 0x00 }; feed_whole(&d, caps, 4); }
+	/* 40 channels one after another, each closed before the next */
+	for (i = 1; i <= 40 && ok; i++)
+	{
+		ok = create_status(&d, (uint8_t)i, name) == 0;
+		close_chan(&d, (uint8_t)i);
+	}
+	CHECK(ok, "create %d after closes refused", i - 1);
+	CHECK(d.nchans <= 1, "slots %d", d.nchans);
+	/* 16 at once, the 17th refused; one closed, then another fits */
+	for (i = 100; i < 116 && ok; i++)
+		ok = create_status(&d, (uint8_t)i, name) == 0;
+	CHECK(ok, "16 open");
+	CHECK(create_status(&d, 116, name) == (int32_t)0x80004005L, "17th: E_FAIL");
+	close_chan(&d, 105);
+	CHECK(rdp_dynvc_find(&d, 105) == NULL, "105 closed");
+	CHECK(create_status(&d, 117, name) == 0, "a closed slot used again");
+	CHECK(rdp_dynvc_find(&d, 117) != NULL && rdp_dynvc_find(&d, 110) != NULL, "117 and 110 open");
+	rdp_dynvc_free(&d);
+}
+
 int main(void)
 {
 	test_vc_reassembly();
@@ -339,6 +394,7 @@ int main(void)
 	test_send_data_fragments();
 	test_softsync();
 	test_compressed_rejected();
+	test_slots_reused();
 	printf("drdynvc: %d passed, %d failed\n", passes, fails);
 	return fails ? 1 : 0;
 }

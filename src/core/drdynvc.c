@@ -150,6 +150,18 @@ static int handle_caps(struct rdp_dynvc* d, const uint8_t* p, size_t len)
 	return send_raw(d, rsp, 4);
 }
 
+/* a slot for a new channel: a closed one again, or the next (review 2 N4) */
+static struct rdp_dynvc_chan* free_slot(struct rdp_dynvc* d)
+{
+	int i;
+	for (i = 0; i < d->nchans; i++)
+		if (!d->chans[i].open)
+			return &d->chans[i];
+	if (d->nchans < RDP_DYNVC_MAX_CHANNELS)
+		return &d->chans[d->nchans++];
+	return NULL;
+}
+
 static int handle_create(struct rdp_dynvc* d, int cbid, int pri, const uint8_t* p, size_t len)
 {
 	uint32_t id = 0;
@@ -175,13 +187,12 @@ static int handle_create(struct rdp_dynvc* d, int cbid, int pri, const uint8_t* 
 	pos++;
 
 	L = find_listener(d, name);
-	if (!L || d->nchans >= RDP_DYNVC_MAX_CHANNELS)
+	if (!L || !(ch = free_slot(d)))
 		status = (int32_t)0x80004005L; /* E_FAIL */
 	else if (L->on_create && (rc = L->on_create(d, id, name, L->user)) < 0)
 		status = (int32_t)0x80004005L;
 	else
 	{
-		ch = &d->chans[d->nchans++];
 		memset(ch, 0, sizeof(*ch));
 		ch->id = id;
 		ch->open = 1;

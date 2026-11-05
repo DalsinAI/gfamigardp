@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include "knownhosts.h"
 
 static int fails, passes;
@@ -59,6 +60,61 @@ int main(void)
 	fputs("junk 12:34\n", fh);
 	fclose(fh);
 	CHECK(rdp_known_host_get("junk", 0, got) == 0, "junk");
+
+	/* review 2 N3: the host is compared in lower case, without a trailing dot */
+	CHECK(rdp_known_host_get("PC", 3389, got) == 1 && !memcmp(got, b, 32), "upper case finds it");
+	CHECK(rdp_known_host_get("Other.Example.ORG.", 3389, got) == 1, "case and trailing dot");
+	CHECK(rdp_known_host_set("Other.EXAMPLE.org", 3389, a) == 0, "replace by another spelling");
+	CHECK(rdp_known_host_get("other.example.org", 3389, got) == 1 && !memcmp(got, a, 32), "one pin for both spellings");
+	{
+		/* a line an older GFAmigaRDP wrote in mixed case is found and replaced too */
+		fh = fopen(file, "a");
+		rdp_fingerprint_text(a, text);
+		fprintf(fh, "Mixed.Example.Org:3389 %s\n", text);
+		fclose(fh);
+		CHECK(rdp_known_host_get("mixed.example.org", 3389, got) == 1 && !memcmp(got, a, 32), "old mixed-case line");
+		CHECK(rdp_known_host_set("MIXED.example.org", 3389, b) == 0, "replace it");
+		CHECK(rdp_known_host_get("Mixed.Example.Org", 3389, got) == 1 && !memcmp(got, b, 32), "replaced");
+	}
+
+	/* no cap: 300 hosts and comments, and every one is still pinned */
+	{
+		char h[64], tmp[96];
+		int ok = 1;
+		fh = fopen(file, "a");
+		for (i = 0; i < 40; i++)
+			fprintf(fh, "# a comment %d\n", i);
+		fclose(fh);
+		for (i = 0; i < 300 && ok; i++)
+		{
+			snprintf(h, sizeof(h), "host%03d.example.org", i);
+			ok = rdp_known_host_set(h, 3389, (i & 1) ? a : b) == 0;
+		}
+		CHECK(ok, "300 sets");
+		for (i = 0; i < 300 && ok; i++)
+		{
+			snprintf(h, sizeof(h), "host%03d.example.org", i);
+			ok = rdp_known_host_get(h, 3389, got) == 1 && !memcmp(got, (i & 1) ? a : b, 32);
+		}
+		CHECK(ok, "host%03d lost", i - 1);
+		CHECK(rdp_known_host_get("pc", 3389, got) == 1 && !memcmp(got, b, 32), "the first host still there");
+
+		/* written beside it and renamed over it: no .new left behind */
+		snprintf(tmp, sizeof(tmp), "%s.new", file);
+		CHECK(access(tmp, F_OK) != 0, "%s left behind", tmp);
+		/* a crash after the old file went and before the rename: the
+		 * new one is read, and the next write puts the file back */
+		CHECK(rename(file, tmp) == 0, "simulate the crash");
+		CHECK(rdp_known_host_get("host123.example.org", 3389, got) == 1 && !memcmp(got, a, 32), "read from .new");
+		CHECK(rdp_known_host_set("after.example.org", 3389, a) == 0, "set after the crash");
+		CHECK(access(file, F_OK) == 0 && access(tmp, F_OK) != 0, "file back, .new gone");
+		CHECK(rdp_known_host_get("host200.example.org", 3389, got) == 1 && !memcmp(got, b, 32), "kept through it");
+		/* a write that cannot happen leaves the file as it was */
+		CHECK(mkdir(tmp, 0755) == 0, "block the .new");
+		CHECK(rdp_known_host_set("blocked.example.org", 3389, a) < 0, "set fails");
+		CHECK(rdp_known_host_get("host007.example.org", 3389, got) == 1, "file untouched");
+		rmdir(tmp);
+	}
 	remove(file);
 	snprintf(file, sizeof(file), "%s/sub", path);
 	rmdir(file);

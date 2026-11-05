@@ -51,6 +51,10 @@ struct ct_msg
 	uint16_t color_depths;
 	char channels[64];
 	uint8_t gfx;              /* 1: decode the Graphics Pipeline (rdp_conn.gfx_enable) */
+	/* Auto-reconnect cookie from Save Session Info; never a password */
+	uint8_t arc_have;
+	uint32_t arc_logon_id;
+	uint8_t arc_random[16];
 	char security[128];
 	int32_t sock_id;          /* READY: ReleaseSocket id; the UI obtains it */
 };

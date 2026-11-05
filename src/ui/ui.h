@@ -6,9 +6,11 @@
 #define RDP_UI_H
 
 #include <exec/types.h>
+#include <stdint.h>
 #include <intuition/intuition.h>
 
 #include "markup.h"
+#include "arc.h"
 
 struct rdp_conn;
 
@@ -41,6 +43,13 @@ struct session_info
 	char security[128];  /* the negotiated protocol, the TLS cipher and how far it got, in words */
 	int demo;            /* 1: no server, a test pattern */
 	struct rdp_conn* conn;   /* the app's: open (live) after licensing, for the session window */
+	/* Remembered for cookie reconnect (never a password): */
+	uint16_t port;
+	uint32_t protocols;
+	uint16_t early_caps, color_depths;
+	uint8_t gfx;
+	struct rdp_arc_cookie arc; /* from Save Session Info; wiped on Disconnect */
+	int want_reconnect;       /* session asks connect_window to cookie-reconnect */
 };
 
 struct app
@@ -62,7 +71,7 @@ void fav_demo(struct app* app);
 int connect_window(struct app* app, const char* host, struct session_info* info);
 
 /* session_win.c: answers 1 to go back to the connection window, 0 to quit */
-int session_window(struct app* app, const struct session_info* info);
+int session_window(struct app* app, struct session_info* info);
 
 /* desktop.c: the desktop area: a test pattern until the RDP output draws there */
 void desktop_draw(struct Window* win, int x, int y, int w, int h, const struct session_info* info);

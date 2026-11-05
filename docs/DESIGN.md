@@ -179,7 +179,7 @@ itself when no text field has the focus (src/ui/connect_win.c).
 | 3 | input: fast-path keyboard (rawkey to scancode) and mouse | Done (US/UK); Unicode/IME/other maps open |
 | 4 | NLA: MD4, RC4, HMAC-MD5, NTLMv2, SPNEGO, CredSSP v6 | **High**: byte-exact NTLMv2 and the pubKeyAuth binding; needs test vectors from [MS-NLMP] 4.2 |
 | 5 | drawing orders and caches ([MS-RDPEGDI]); gfopengpu stream | Medium: order field encodings; cache sizes in Amiga RAM |
-| 6 | full screen, reconnect, certificate trust UI, favourites polish | Low |
+| 6 | full screen (BestModeID custom screen), cookie reconnect (no password), certificate trust UI, favourites polish | Low |
 | 7 | channels: cliprdr, rdpsnd via AHI | Medium: AHI timing on a 68040 |
 
 Other risks:

@@ -7,6 +7,8 @@
  * MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #include "ui.h"
+#include "x224.h"
+#include "arc.h"
 #include "amipr.h"
 #include "connect.h"
 #include "nla.h"
@@ -236,6 +238,8 @@ static int ct_drain(struct cw* c)
 			case CT_EVT_ERROR:
 				set_status(c, m->text[0] ? m->text : "Not connected.");
 				c->busy = 0;
+				if (c->info)
+					c->info->want_reconnect = 0;
 				break;
 			case CT_EVT_READY:
 			{
@@ -329,6 +333,45 @@ static void wipe(volatile char* p, size_t n)
 		*p++ = 0;
 }
 
+/* Cookie reconnect: no password. Uses the Save Session Info cookie only. */
+static void do_cookie_reconnect(struct cw* c)
+{
+	struct session_info* info = c->info;
+	struct ct_msg params;
+	char line[320];
+	if (c->busy || !info || !info->arc.have || !info->conn)
+		return;
+	memset(&params, 0, sizeof(params));
+	strncpy(params.host, info->host, sizeof(params.host) - 1);
+	strncpy(params.user, info->user, sizeof(params.user) - 1);
+	strncpy(params.domain, info->domain, sizeof(params.domain) - 1);
+	params.port = info->port ? info->port : 3389;
+	params.width = info->width;
+	params.height = info->height;
+	params.depth = (uint8_t)info->depth;
+	params.protocols = RDP_PROTOCOL_SSL; /* cookie path: TLS only */
+	params.early_caps = info->early_caps ? info->early_caps : 0x0103;
+	params.color_depths = info->color_depths ? info->color_depths : 0x000F;
+	params.gfx = info->gfx;
+	strncpy(params.channels, "drdynvc", sizeof(params.channels) - 1);
+	params.arc_have = 1;
+	params.arc_logon_id = info->arc.logon_id;
+	memcpy(params.arc_random, info->arc.random, sizeof(params.arc_random));
+	/* password left empty on purpose */
+	c->ct.conn = info->conn;
+	snprintf(line, sizeof(line), "Reconnecting to %s (session cookie)...", info->host);
+	set_status(c, line);
+	olui_amiga_draw(c->a);
+	info->want_reconnect = 0;
+	if (ct_connect(&c->ct, &params) < 0)
+	{
+		set_status(c, "Could not start the reconnect.");
+		rdp_arc_clear(&info->arc);
+		return;
+	}
+	c->busy = 1;
+}
+
 static void do_connect(struct cw* c)
 {
 	struct session_info* info = c->info;
@@ -381,6 +424,9 @@ static void do_connect(struct cw* c)
 	params.height = info->height;
 	params.depth = (uint8_t)info->depth;
 	params.protocols = ui_security[s].protocols;
+	/* Remember for a later cookie reconnect (password never stored). */
+	info->port = params.port;
+	info->protocols = params.protocols;
 	/* The Graphics Pipeline ([MS-RDPEGFX]) is how the desktop is drawn:
 	 * the drdynvc channel, RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL (0x0100),
 	 * RNS_UD_CS_WANT_32BPP_SESSION (0x0002) and errinfo (0x0001). Honest now:
@@ -403,7 +449,16 @@ static void do_connect(struct cw* c)
 		params.color_depths |= 0x0002;
 	else if (params.depth == 15)
 		params.color_depths |= 0x0004;
+	info->early_caps = params.early_caps;
+	info->color_depths = params.color_depths;
+	info->gfx = params.gfx;
 	take_password(c, params.password, sizeof(params.password));
+	if (info->arc.have)
+	{
+		params.arc_have = 1;
+		params.arc_logon_id = info->arc.logon_id;
+		memcpy(params.arc_random, info->arc.random, sizeof(params.arc_random));
+	}
 	c->ct.conn = conn;
 	snprintf(line, sizeof(line), "Connecting to %s...", info->host);
 	set_status(c, line);
@@ -622,6 +677,11 @@ int connect_window(struct app* app, const char* host, struct session_info* info)
 					ctsig = 1UL << c.ct.ui_port->mp_SigBit;
 				else
 					set_status(&c, "Could not create the connection port.");
+				if (c.info->want_reconnect && c.info->arc.have && ctsig)
+				{
+					do_cookie_reconnect(&c);
+					olui_amiga_draw(c.a);
+				}
 				while (c.result < 0)
 				{
 					ULONG sig = Wait(winsig | ctsig | SIGBREAKF_CTRL_C);

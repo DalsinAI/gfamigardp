@@ -319,6 +319,10 @@ static int handle(struct rdp_conn* c, size_t len)
 				case RDP_PDUTYPE2_UPDATE:
 					c->slow_updates++;
 					break;
+				case RDP_PDUTYPE2_SAVE_SESSION_INFO:
+					/* Auto-reconnect cookie (2.2.10.1); memory only, never a password */
+					(void)rdp_arc_from_save_session(&c->arc, sh.body, sh.body_len);
+					break;
 				default:
 					break;
 			}

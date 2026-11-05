@@ -6,6 +6,7 @@
  * MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #include "mcs.h"
+#include "arc.h"
 #include "stream.h"
 #include "utf16.h"
 #include "amipr.h"
@@ -586,7 +587,23 @@ static int send_client_info(struct rdp_transport* t, uint8_t* buf, const struct 
 	}
 	rdp_s_u32le(&s, 0);                  /* clientSessionId */
 	rdp_s_u32le(&s, 0x00000007);         /* performanceFlags: no wallpaper, full-window drag, menu animations */
-	rdp_s_u16le(&s, 0);                  /* cbAutoReconnectCookie */
+	/* Auto-reconnect: ARC_CS when the settings carry a Save Session Info cookie
+	 * (Enhanced Security verifier = HMAC-MD5(random, 32 zeros)). No password is
+	 * kept for reconnect; the cookie alone proves the prior client (5.5). */
+	if (set->arc && set->arc->have)
+	{
+		uint8_t cs[RDP_ARC_COOKIE_LEN];
+		if (rdp_arc_build_cs(cs, set->arc) == 0)
+		{
+			rdp_s_u16le(&s, RDP_ARC_COOKIE_LEN);
+			rdp_s_bytes(&s, cs, RDP_ARC_COOKIE_LEN);
+			memset(cs, 0, sizeof(cs));
+		}
+		else
+			rdp_s_u16le(&s, 0);
+	}
+	else
+		rdp_s_u16le(&s, 0);                  /* cbAutoReconnectCookie */
 	if (s.err)
 		rc = RDP_E_SPACE;
 	else

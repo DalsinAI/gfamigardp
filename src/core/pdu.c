@@ -67,7 +67,7 @@ static void caps(struct rdp_stream* s, uint16_t w, uint16_t h, uint16_t bpp, uin
 	rdp_s_u16le(s, 0x0200);         /* protocolVersion TS_CAPS_PROTOCOLVERSION */
 	rdp_s_u16le(s, 0);              /* pad2octetsA */
 	rdp_s_u16le(s, 0);              /* generalCompressionTypes */
-	rdp_s_u16le(s, 0x0001 | 0x0004 | 0x0400);  /* FASTPATH_OUTPUT_SUPPORTED, LONG_CREDENTIALS_SUPPORTED, NO_BITMAP_COMPRESSION_HDR */
+	rdp_s_u16le(s, 0x0001 | 0x0004 | 0x0008 | 0x0400);  /* FASTPATH, LONG_CREDENTIALS, AUTORECONNECT, NO_BITMAP_COMPRESSION_HDR */
 	rdp_s_u16le(s, 0);              /* updateCapabilityFlag */
 	rdp_s_u16le(s, 0);              /* remoteUnshareFlag */
 	rdp_s_u16le(s, 0);              /* generalCompressionLevel */

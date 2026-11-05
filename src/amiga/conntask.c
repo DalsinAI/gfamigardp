@@ -9,6 +9,7 @@
 #include "mcs.h"
 #include "x509.h"
 #include "session.h"
+#include "arc.h"
 #include "knownhosts.h"
 #include "transport.h"
 
@@ -231,6 +232,7 @@ static void do_connect(struct ct_priv* p, struct ct_msg* req)
 	char line[320];
 	int rc, tries = 0;
 	struct ct_handle* h = p->h;
+	struct rdp_arc_cookie arc;
 
 	p->cancel = 0;
 	h->busy = 1;
@@ -251,6 +253,18 @@ static void do_connect(struct ct_priv* p, struct ct_msg* req)
 	if (p->params.early_caps) s.early_caps = p->params.early_caps;
 	if (p->params.color_depths) s.color_depths = p->params.color_depths;
 	if (p->params.channels[0]) s.channels = p->params.channels;
+	rdp_arc_clear(&arc);
+	if (p->params.arc_have)
+	{
+		arc.have = 1;
+		arc.logon_id = p->params.arc_logon_id;
+		memcpy(arc.random, p->params.arc_random, sizeof(arc.random));
+		s.arc = &arc;
+		/* Cookie reconnect without a password: TLS only (Client Info carries ARC_CS).
+		 * NLA/CredSSP would need the password we deliberately do not keep. */
+		if (!p->password[0])
+			s.protocols = RDP_PROTOCOL_SSL;
+	}
 
 	amipr_set_abort(1UL << p->port->mp_SigBit, abort_cb, p);
 

@@ -14,6 +14,7 @@
 #include "mcs.h"
 #include "pdu.h"
 #include "drdynvc.h"
+#include "arc.h"
 
 struct rdp_gfx;   /* rdpgfx.h */
 
@@ -74,6 +75,8 @@ struct rdp_conn
 	size_t in_q_len;
 	uint32_t in_sent;            /* PDUs written */
 	uint32_t in_drop;            /* events dropped (queue full) */
+	/* Save Session Info auto-reconnect cookie (memory only; never a password) */
+	struct rdp_arc_cookie arc;
 	/* the last few PDUs read, for RDPProbe's trace */
 	struct
 	{

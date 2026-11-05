@@ -15,12 +15,16 @@
 
 #include <exec/types.h>
 #include <intuition/intuition.h>
+#include <intuition/screens.h>
 #include <devices/inputevent.h>
 #include <libraries/gadtools.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/intuition.h>
 #include <proto/gadtools.h>
+#include <proto/graphics.h>
+#include <graphics/modeid.h>
+#include <graphics/displayinfo.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -55,7 +59,7 @@ struct sw
 	olui *tb, *sb;
 	olui_amiga *atb, *asb;
 	int tb_h, sb_h;
-	const struct session_info* info;
+	struct session_info* info;
 	struct rdp_conn* conn;   /* live: the session's connection, closed when the window closes */
 	int result; /* -1 running, 0 quit, 1 back to the connection window */
 	int shown_act;           /* what the status bar last said, so it changes only when the session does */
@@ -66,6 +70,12 @@ struct sw
 	int view_ox, view_oy;    /* pan: top-left of the band in remote/fb coordinates */
 	int panning;             /* 1 while left-dragging the desktop to pan */
 	int pan_mx, pan_my;      /* last mouse position during a pan drag */
+	struct Screen* pub;     /* Workbench / locked public screen */
+	struct Screen* own;     /* custom fullscreen screen, or NULL */
+	int fullscreen;
+	int user_disc;          /* 1: user chose Disconnect/Quit — no auto-reconnect */
+	struct app* app;
+	struct Menu* menu;
 };
 
 /* 1/30 s: dirty rectangles that come faster wait for the next one */
@@ -76,6 +86,10 @@ static void draw_desktop(struct sw* s);
 static void show_mode(struct sw* s);
 static void pan_home(struct sw* s);
 static void pan_by(struct sw* s, int dx, int dy);
+static void clamp_pan(struct sw* s);
+static void sync_view(struct sw* s);
+static void toggle_fullscreen(struct sw* s);
+static void end_session(struct sw* s, int result, int user_disc);
 
 static const char* codec_name(uint16_t id)
 {
@@ -162,6 +176,8 @@ static void show_session(struct sw* s, int rc)
 		else
 			snprintf(line, sizeof(line), "The session stopped (%s): %s", rdp_act_name(c->act), rdp_error_text(rc));
 	}
+	else if (c->act == RDP_ACT_DEACTIVATED)
+		snprintf(line, sizeof(line), "The computer is re-exchanging capabilities (resize or reconnect).");
 	else if (c->act == RDP_ACT_ACTIVE && c->gfx && c->gfx->st.skipped_codec)
 		snprintf(line, sizeof(line), "Session active; %lu frames. Parts not drawn: the computer uses %s "
 		         "(%lu tiles), which GFAmigaRDP does not decode yet.",
@@ -234,6 +250,33 @@ static void send_rawkey(struct sw* s, UWORD code)
 	(void)rdp_conn_input_key(s->conn, scan, ext, release);
 }
 
+/* Harvest cookie before the connection is torn down. */
+static void harvest_cookie(struct sw* s)
+{
+	if (!s->info || !s->conn)
+		return;
+	if (s->conn->arc.have)
+		s->info->arc = s->conn->arc;
+}
+
+/* User Disconnect/Quit: wipe cookie, close, set result. */
+static void end_session(struct sw* s, int result, int user_disc)
+{
+	s->user_disc = user_disc;
+	if (user_disc && s->info)
+	{
+		rdp_arc_clear(&s->info->arc);
+		s->info->want_reconnect = 0;
+	}
+	if (s->conn && s->conn->live)
+	{
+		if (user_disc)
+			rdp_arc_clear(&s->conn->arc);
+		rdp_conn_close(s->conn);
+	}
+	s->result = result;
+}
+
 /* reads what the computer sent, without waiting; ends the connection when it ended */
 static void poll_session(struct sw* s)
 {
@@ -241,17 +284,193 @@ static void poll_session(struct sw* s)
 	if (!s->conn || !s->conn->live)
 		return;
 	rc = rdp_conn_poll(s->conn, 16);
+	/* Keep the latest Save Session Info cookie on the session_info. */
+	if (s->conn->arc.have && s->info)
+		s->info->arc = s->conn->arc;
 	show_session(s, rc);
-	if (rc < 0)
+	if (rc < 0 || s->conn->act == RDP_ACT_ENDED)
+	{
+		harvest_cookie(s);
 		rdp_conn_close(s->conn);
+		/* Unexpected drop with a cookie: ask connect_window to reconnect (no password). */
+		if (!s->user_disc && s->info && s->info->arc.have && !s->info->demo)
+		{
+			s->info->want_reconnect = 1;
+			status(s, "The session dropped. Reconnecting with the session cookie...");
+			s->result = 1;   /* back to connect_window for cookie reconnect */
+		}
+	}
+}
+
+
+/* Open a custom screen of the remote desktop's size (BestModeID), or leave it.
+ * Pan stays; no forced scale on 68040 (DESIGN). Toolbar/status remain. */
+static int open_session_window(struct sw* s, struct Screen* scr, const char* title, int inner_w, int inner_h)
+{
+	ULONG scr_tag = s->fullscreen ? WA_CustomScreen : WA_PubScreen;
+	s->win = OpenWindowTags(NULL,
+		WA_Title, (ULONG)title,
+		WA_ScreenTitle, (ULONG)APP_NAME " " APP_VERSION,
+		scr_tag, (ULONG)scr,
+		WA_InnerWidth, inner_w, WA_InnerHeight, inner_h + s->tb_h + s->sb_h,
+		WA_AutoAdjust, TRUE,
+		WA_MinWidth, 320, WA_MinHeight, 120 + s->tb_h + s->sb_h, WA_MaxWidth, ~0UL, WA_MaxHeight, ~0UL,
+		WA_DragBar, s->fullscreen ? FALSE : TRUE,
+		WA_DepthGadget, s->fullscreen ? FALSE : TRUE,
+		WA_CloseGadget, TRUE, WA_SizeGadget, s->fullscreen ? FALSE : TRUE,
+		WA_SizeBBottom, s->fullscreen ? FALSE : TRUE,
+		WA_Borderless, s->fullscreen ? TRUE : FALSE,
+		WA_Activate, TRUE, WA_SimpleRefresh, TRUE, WA_ReportMouse, TRUE, WA_NewLookMenus, TRUE,
+		WA_RMBTrap, TRUE,
+		WA_IDCMP, olui_amiga_idcmp() | IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS | IDCMP_MOUSEMOVE, TAG_DONE);
+	return s->win != NULL;
+}
+
+static void rebind_strips(struct sw* s)
+{
+	if (s->atb)
+	{
+		olui_amiga_free(s->atb);
+		s->atb = NULL;
+	}
+	if (s->asb)
+	{
+		olui_amiga_free(s->asb);
+		s->asb = NULL;
+	}
+	if (!s->tb || !s->sb || !s->win)
+		return;
+	s->atb = olui_amiga_new(s->tb, s->win);
+	s->asb = olui_amiga_new(s->sb, s->win);
+	if (!s->atb || !s->asb)
+		return;
+	olui_amiga_theme(s->atb, NULL);
+	olui_amiga_theme(s->asb, NULL);
+	olui_amiga_keys(s->atb, OLUI_AMIGA_KEYS_FOCUS);
+	olui_amiga_keys(s->asb, OLUI_AMIGA_KEYS_FOCUS);
+	(void)olui_amiga_strip(s->atb, 0, 0, 0, s->tb_h);
+	(void)olui_amiga_strip(s->asb, 0, -s->sb_h, 0, 0);
+	(void)olui_amiga_layout(s->atb);
+	(void)olui_amiga_layout(s->asb);
+}
+
+static void toggle_fullscreen(struct sw* s)
+{
+	char title[320];
+	ULONG mode;
+	unsigned w, h, depth;
+	struct Screen* target;
+	struct Menu* menu = s->menu;
+
+	if (!s->info || !s->pub)
+		return;
+	w = s->info->width;
+	h = s->info->height;
+	if (s->conn && s->conn->demand.width)
+	{
+		w = s->conn->demand.width;
+		h = s->conn->demand.height;
+	}
+	depth = s->pub->RastPort.BitMap ? s->pub->RastPort.BitMap->Depth : 8;
+	snprintf(title, sizeof(title), APP_NAME " \xB7 %s%s", s->info->host, s->info->demo ? " (demo)" : "");
+
+	if (menu && s->win)
+	{
+		ClearMenuStrip(s->win);
+	}
+	if (s->win)
+	{
+		CloseWindow(s->win);
+		s->win = NULL;
+	}
+
+	if (!s->fullscreen)
+	{
+		mode = BestModeID(BIDTAG_NominalWidth, w,
+		                  BIDTAG_NominalHeight, h,
+		                  BIDTAG_Depth, depth,
+		                  TAG_END);
+		s->own = OpenScreenTags(NULL,
+			SA_Type, CUSTOMSCREEN,
+			SA_DisplayID, mode,
+			SA_Width, w,
+			SA_Height, h,
+			SA_Depth, depth,
+			SA_ShowTitle, FALSE,
+			SA_Quiet, TRUE,
+			SA_Title, (ULONG)APP_NAME,
+			TAG_END);
+		if (!s->own)
+		{
+			/* Fall back to the public screen window. */
+			s->fullscreen = 0;
+			if (!open_session_window(s, s->pub, title, (int)w, (int)h))
+			{
+				status(s, "Full screen failed: could not open a window.");
+				s->result = 1;
+				return;
+			}
+			rebind_strips(s);
+			if (menu)
+				SetMenuStrip(s->win, menu);
+			status(s, "Full screen is not available for this size; staying in a window.");
+			draw_desktop(s);
+			show_mode(s);
+			return;
+		}
+		s->fullscreen = 1;
+		target = s->own;
+		if (!open_session_window(s, target, title, (int)w, (int)h))
+		{
+			CloseScreen(s->own);
+			s->own = NULL;
+			s->fullscreen = 0;
+			open_session_window(s, s->pub, title, (int)s->info->width, (int)s->info->height);
+			rebind_strips(s);
+			if (menu && s->win)
+				SetMenuStrip(s->win, menu);
+			status(s, "Full screen failed: could not open the session window.");
+			return;
+		}
+		rebind_strips(s);
+		if (menu)
+			SetMenuStrip(s->win, menu);
+		status(s, "Full screen. Amiga-F or Full screen returns to a window.");
+	}
+	else
+	{
+		if (s->own)
+		{
+			CloseScreen(s->own);
+			s->own = NULL;
+		}
+		s->fullscreen = 0;
+		if (!open_session_window(s, s->pub, title, (int)s->info->width, (int)s->info->height))
+		{
+			s->result = 1;
+			return;
+		}
+		rebind_strips(s);
+		if (menu)
+			SetMenuStrip(s->win, menu);
+		status(s, "Windowed again.");
+	}
+	clamp_pan(s);
+	sync_view(s);
+	if (s->conn && s->conn->gfx)
+		rdp_gfx_paint_view(s->conn->gfx);
+	draw_desktop(s);
+	show_mode(s);
+	olui_amiga_draw(s->atb);
+	olui_amiga_draw(s->asb);
 }
 
 static void action(struct sw* s, int what)
 {
 	switch (what)
 	{
-		case M_DISC: s->result = 1; break;
-		case M_QUIT: s->result = 0; break;
+		case M_DISC: end_session(s, 1, 1); break;
+		case M_QUIT: end_session(s, 0, 1); break;
 		case M_CAD:
 			if (s->info->demo)
 				status(s, "Demo: Ctrl-Alt-Del would go to the computer now.");
@@ -263,7 +482,7 @@ static void action(struct sw* s, int what)
 			else
 				status(s, "Ctrl-Alt-Del waits until the session is active.");
 			break;
-		case M_FULL: status(s, "Full screen comes with the session's own screen (roadmap phase 4)."); break;
+		case M_FULL: toggle_fullscreen(s); break;
 		case M_ABOUT: ui_about(s->win); break;
 		case M_HOME: pan_home(s); break;
 		case M_PAN_L: case M_PAN_R: case M_PAN_U: case M_PAN_D:
@@ -436,7 +655,7 @@ static int setup(struct sw* s, olui** ui, olui_amiga** a, const char* markup, co
  * licensing to the Font Map */
 #define ACTIVATE_US 60000000ULL
 
-int session_window(struct app* app, const struct session_info* info)
+int session_window(struct app* app, struct session_info* info)
 {
 	struct sw s;
 	struct Menu* menu;
@@ -446,6 +665,8 @@ int session_window(struct app* app, const struct session_info* info)
 
 	memset(&s, 0, sizeof(s));
 	s.info = info;
+	s.app = app;
+	s.pub = app->screen;
 	s.conn = (!info->demo && info->conn && info->conn->live) ? info->conn : NULL;
 	s.shown_act = -1;
 	s.result = -1;
@@ -453,21 +674,10 @@ int session_window(struct app* app, const struct session_info* info)
 	s.sb_h = fh + 6;
 	snprintf(title, sizeof(title), APP_NAME " \xB7 %s%s", info->host, info->demo ? " (demo)" : "");
 
-	s.win = OpenWindowTags(NULL,
-		WA_Title, (ULONG)title,
-		WA_ScreenTitle, (ULONG)APP_NAME " " APP_VERSION,
-		WA_PubScreen, (ULONG)app->screen,
-		WA_InnerWidth, info->width, WA_InnerHeight, info->height + s.tb_h + s.sb_h,
-		WA_AutoAdjust, TRUE,
-		WA_MinWidth, 320, WA_MinHeight, 120 + s.tb_h + s.sb_h, WA_MaxWidth, ~0UL, WA_MaxHeight, ~0UL,
-		WA_DragBar, TRUE, WA_DepthGadget, TRUE, WA_CloseGadget, TRUE, WA_SizeGadget, TRUE,
-		WA_SizeBBottom, TRUE,
-		WA_Activate, TRUE, WA_SimpleRefresh, TRUE, WA_ReportMouse, TRUE, WA_NewLookMenus, TRUE,
-		WA_RMBTrap, TRUE,   /* right-click is remote MENUDOWN, not the Intuition menu */
-		WA_IDCMP, olui_amiga_idcmp() | IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS | IDCMP_MOUSEMOVE, TAG_DONE);
-	if (!s.win)
+	if (!open_session_window(&s, s.pub, title, (int)info->width, (int)info->height))
 		return 1;
 	menu = ui_menus(app, menus);
+	s.menu = menu;
 	if (menu)
 		SetMenuStrip(s.win, menu);
 
@@ -545,7 +755,7 @@ int session_window(struct app* app, const struct session_info* info)
 			else
 				sig = Wait(winsig | SIGBREAKF_CTRL_C);
 			if (sig & SIGBREAKF_CTRL_C)
-				s.result = 0;
+				end_session(&s, 0, 1);
 			while (s.result < 0 && (m = (struct IntuiMessage*)GetMsg(s.win->UserPort)))
 			{
 				ULONG cls = m->Class;
@@ -569,7 +779,7 @@ int session_window(struct app* app, const struct session_info* info)
 				r2 = olui_amiga_event(s.asb, m);
 				ReplyMsg(&m->ExecMessage);
 				if (r1 == OLUI_AMIGA_CLOSE || r2 == OLUI_AMIGA_CLOSE || cls == IDCMP_CLOSEWINDOW)
-					s.result = 1;
+					end_session(&s, 1, 1);
 				else if (cls == IDCMP_REFRESHWINDOW)
 				{
 					BeginRefresh(s.win);
@@ -578,8 +788,12 @@ int session_window(struct app* app, const struct session_info* info)
 				}
 				else if (cls == IDCMP_NEWSIZE)
 				{
-					/* a new size: the strips laid out again (above), the
-					 * desktop band between them is now somewhere else */
+					/* strips already laid out in olui_amiga_event; re-assert strip
+					 * geometry so a size change cannot leave a stale band (review) */
+					if (s.atb)
+						(void)olui_amiga_strip(s.atb, 0, 0, 0, s.tb_h);
+					if (s.asb)
+						(void)olui_amiga_strip(s.asb, 0, -s.sb_h, 0, 0);
 					olui_amiga_draw(s.atb);
 					olui_amiga_draw(s.asb);
 					clamp_pan(&s);
@@ -656,17 +870,30 @@ int session_window(struct app* app, const struct session_info* info)
 	}
 	else
 		s.result = 1;
-	if (s.conn)
+	if (s.conn && s.conn->live)
+	{
+		if (s.user_disc)
+			rdp_arc_clear(&s.conn->arc);
+		else
+			harvest_cookie(&s);
 		rdp_conn_close(s.conn);   /* the Disconnect Provider Ultimatum when it is still up */
+	}
 	olui_amiga_free(s.atb);
 	olui_free(s.tb);
 	olui_amiga_free(s.asb);
 	olui_free(s.sb);
-	if (menu)
+	if (menu && s.win)
 	{
 		ClearMenuStrip(s.win);
 		FreeMenus(menu);
+		s.menu = NULL;
 	}
-	CloseWindow(s.win);
+	if (s.win)
+		CloseWindow(s.win);
+	if (s.own)
+	{
+		CloseScreen(s.own);
+		s.own = NULL;
+	}
 	return s.result;
 }

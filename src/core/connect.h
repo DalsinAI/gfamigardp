@@ -11,6 +11,8 @@
 #include "transport.h"
 #include "x224.h"
 
+struct rdp_arc_cookie;
+
 struct rdp_settings
 {
 	const char* host;
@@ -33,6 +35,7 @@ struct rdp_settings
 	uint32_t keyboard_layout; /* CS_CORE / Input capability: 0 = US 0x0409, or a Windows KLID */
 	int timezone_bias;         /* TS_TIME_ZONE_INFORMATION Bias (minutes to add to local for UTC) */
 	int timezone_bias_set;     /* 1: timezone_bias was filled; 0: take it from locale.library */
+	const struct rdp_arc_cookie* arc; /* Client Info auto-reconnect cookie, or NULL */
 };
 
 void rdp_settings_default(struct rdp_settings* s);

@@ -8,8 +8,8 @@ sources while doing so.
 ## Allowed sources
 
 - Microsoft Open Specifications: [MS-RDPBCGR], [MS-RDPELE], [MS-CSSP], [MS-NLMP],
-  [MS-RDPEGDI], [MS-RDPNSC], [MS-RDPEFS], [MS-RDPECLIP], [MS-RDPEA], [MS-RDPERP]
-  (as needed), [MS-ERREF] for error codes.
+  [MS-RDPEGDI], [MS-RDPNSC], [MS-RDPEDYC], [MS-RDPEGFX], [MS-RDPEFS],
+  [MS-RDPECLIP], [MS-RDPEA], [MS-RDPERP] (as needed), [MS-ERREF] for error codes.
 - ITU-T T.123 (TPKT), X.224, T.125 (MCS) and X.680/X.690 (ASN.1 BER/PER/DER);
   T.124 (GCC) as quoted in [MS-RDPBCGR].
 - IETF RFCs: 1006 (TPKT), 1320 (MD4), 1321 (MD5), 2104 and 2202 (HMAC and

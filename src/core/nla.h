@@ -23,7 +23,7 @@ struct rdp_nla_result
 	int stage;                    /* 1 NEGOTIATE sent, 2 AUTHENTICATE sent, 3 credentials sent */
 	int closed_after;             /* the server closed the connection after this stage (0: it did not) */
 	uint32_t early_auth;          /* HYBRID_EX: the Early User Authorization Result */
-	const char* lib_error;        /* GN_ErrorText of gnerr */
+	char lib_error[96];           /* copy of GN_ErrorText(gnerr); never a library pointer (M2) */
 	int bound;                    /* 1: the NTLM exchange carried the TLS channel bindings
 	                                 (gfopenntlm.library 1.1 and later, GNA_CHANNELBINDINGS) */
 };

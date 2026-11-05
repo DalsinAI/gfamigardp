@@ -30,6 +30,7 @@ struct ct_priv
 	struct ct_handle* h;
 	struct MsgPort* port;
 	volatile int cancel;
+	volatile int quit;         /* CT_CMD_QUIT seen; exit after current connect (H2) */
 	volatile int cert_reply;   /* -1 waiting, 0 refuse, 1 trust */
 	volatile int cert_waiting;
 	char password[512];
@@ -103,6 +104,8 @@ static int wait_net(struct ct_priv* p, struct rdp_transport* t, int64_t timeout_
 			int16_t arg = m->arg;
 			if (ty == CT_CMD_CANCEL || ty == CT_CMD_DISCONNECT || ty == CT_CMD_QUIT)
 				p->cancel = 1;
+			if (ty == CT_CMD_QUIT)
+				p->quit = 1;
 			if (ty == CT_CMD_CERT && p->cert_waiting)
 			{
 				p->cert_reply = arg ? 1 : 0;
@@ -160,6 +163,8 @@ static int abort_cb(void* user, uint32_t sigs)
 		int16_t arg = m->arg;
 		if (ty == CT_CMD_CANCEL || ty == CT_CMD_DISCONNECT || ty == CT_CMD_QUIT)
 			p->cancel = 1;
+		if (ty == CT_CMD_QUIT)
+			p->quit = 1;
 		if (ty == CT_CMD_CERT && p->cert_waiting)
 		{
 			p->cert_reply = arg ? 1 : 0;
@@ -264,6 +269,10 @@ static void do_connect(struct ct_priv* p, struct ct_msg* req)
 		 * NLA/CredSSP would need the password we deliberately do not keep. */
 		if (!p->password[0])
 			s.protocols = RDP_PROTOCOL_SSL;
+		/* Cookie material is in `arc` now; wipe the message copy. */
+		p->params.arc_have = 0;
+		p->params.arc_logon_id = 0;
+		wipe((volatile char*)p->params.arc_random, sizeof(p->params.arc_random));
 	}
 
 	amipr_set_abort(1UL << p->port->mp_SigBit, abort_cb, p);
@@ -418,12 +427,14 @@ again:
 	/* Hand the live connection to the UI/session window; do not close it. */
 	amipr_set_abort(0, NULL, NULL);
 	wipe(p->password, sizeof(p->password));
+	rdp_arc_clear(&arc);
 	h->busy = 0;
 	return;
 
 fail:
 	amipr_set_abort(0, NULL, NULL);
 	wipe(p->password, sizeof(p->password));
+	rdp_arc_clear(&arc);
 	rdp_conn_close(conn);
 	h->busy = 0;
 }
@@ -464,7 +475,15 @@ static void ct_entry(void)
 				goto done;
 			}
 			if (ty == CT_CMD_CONNECT && !h->busy)
+			{
 				do_connect(p, m);
+				/* QUIT during connect only set cancel; honour it now (H2). */
+				if (p->quit)
+				{
+					FreeVec(m);
+					goto done;
+				}
+			}
 			/* CANCEL/CERT/DISCONNECT while idle: ignore */
 			FreeVec(m);
 		}
@@ -532,6 +551,7 @@ void ct_shutdown(struct ct_handle* h)
 {
 	struct ct_msg* m;
 	uint64_t deadline;
+	int i;
 	if (!h) return;
 	if (h->running && h->conn_port)
 	{
@@ -543,7 +563,7 @@ void ct_shutdown(struct ct_handle* h)
 		}
 		/* Wait until the task exits. Freeing ui_port while it can still
 		 * post_ui (CT_EVT_QUITTED) crashes; do not give up after a short
-		 * timeout and delete the port under it. */
+		 * timeout and delete the port under it (H3). */
 		deadline = amipr_monotonic_us() + 30000000ULL;
 		while (h->running && amipr_monotonic_us() < deadline)
 		{
@@ -555,24 +575,34 @@ void ct_shutdown(struct ct_handle* h)
 				if (e->type == CT_EVT_QUITTED)
 				{
 					FreeVec(e);
-					goto cleared;
+					/* keep draining until running clears */
 				}
-				FreeVec(e);
+				else
+					FreeVec(e);
 			}
 		}
+		/* Soft spin if QUITTED raced ahead of running=0 */
+		for (i = 0; i < 200 && h->running; i++)
+			amipr_sleep_us(10000);
 	}
-cleared:
+	/* Final teardown under Forbid so a restart cannot clobber us (H3). */
+	Forbid();
 	while ((m = ct_get(h)) != NULL)
 		FreeVec(m);
-	/* Only free the reply port once the task is gone (or never started). */
-	if (h->ui_port && !h->running)
+	if (h->running)
+	{
+		/* Still alive after the wait: leave the port; never free under it. */
+		Permit();
+		return;
+	}
+	if (h->ui_port)
 	{
 		DeleteMsgPort(h->ui_port);
 		h->ui_port = NULL;
 	}
 	h->proc = NULL;
-	if (!h->running)
-		s_priv = NULL;
+	s_priv = NULL;
+	Permit();
 }
 
 static int post_cmd(struct ct_handle* h, struct ct_msg* m)
@@ -607,6 +637,14 @@ int ct_connect(struct ct_handle* h, const struct ct_msg* params)
 	m->color_depths = params->color_depths;
 	strncpy(m->channels, params->channels, sizeof(m->channels) - 1);
 	m->gfx = params->gfx;
+	/* Auto-reconnect cookie must travel with CONNECT (H1): without this
+	 * copy, cookie reconnect never fires even when the UI filled arc_*. */
+	m->arc_have = params->arc_have;
+	m->arc_logon_id = params->arc_logon_id;
+	if (params->arc_have)
+		memcpy(m->arc_random, params->arc_random, sizeof(m->arc_random));
+	else
+		memset(m->arc_random, 0, sizeof(m->arc_random));
 	return post_cmd(h, m);
 }
 

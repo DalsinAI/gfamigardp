@@ -530,8 +530,9 @@ static int send_client_info(struct rdp_transport* t, uint8_t* buf, const struct 
 	int rc;
 	/* the password travels in the clear inside this PDU (5.4.4): only
 	 * through TLS to a server whose certificate was checked or pinned
-	 * (review H1) */
-	if (password && *password && (!t->tls || !t->verified))
+	 * (review H1). The ARC cookie is equally sensitive — same gate (M4). */
+	if (((password && *password) || (set->arc && set->arc->have)) &&
+	    (!t->tls || !t->verified))
 		return RDP_E_UNVERIFIED;
 	tpkt_begin(&s, buf, BUF);
 	rdp_s_u8(&s, MCS_SDRQ << 2);

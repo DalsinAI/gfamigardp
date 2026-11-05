@@ -102,13 +102,14 @@ static int get_cbid(const uint8_t* p, size_t len, size_t* pos, int cbid, uint32_
 	else if (cbid == 1)
 	{
 		if (*pos + 2 > len) return -1;
-		*id = (uint32_t)(p[*pos] | (p[*pos + 1] << 8));
+		*id = (uint32_t)p[*pos] | ((uint32_t)p[*pos + 1] << 8);
 		*pos += 2;
 	}
 	else if (cbid == 2)
 	{
 		if (*pos + 4 > len) return -1;
-		*id = (uint32_t)(p[*pos] | (p[*pos + 1] << 8) | (p[*pos + 2] << 16) | (p[*pos + 3] << 24));
+		*id = (uint32_t)p[*pos] | ((uint32_t)p[*pos + 1] << 8) |
+	      ((uint32_t)p[*pos + 2] << 16) | ((uint32_t)p[*pos + 3] << 24);
 		*pos += 4;
 	}
 	else
@@ -135,7 +136,7 @@ static int handle_caps(struct rdp_dynvc* d, const uint8_t* p, size_t len)
 	uint16_t ver;
 	if (len < 3)
 		return RDP_E_PROTO;
-	ver = (uint16_t)(p[1] | (p[2] << 8));
+	ver = (uint16_t)((uint32_t)p[1] | ((uint32_t)p[2] << 8));
 	if (ver < 1 || ver > 3)
 		ver = 1;
 	/* we support version 1 (no compressed data, no priority charges needed) */
@@ -292,18 +293,20 @@ static int handle_data(struct rdp_dynvc* d, int cbid, const uint8_t* p, size_t l
 	if (!ch)
 		return 0;
 	payload = len - pos;
-	/* unfragmented: DATA without a preceding DATA_FIRST */
+	/* unfragmented: DATA without a preceding DATA_FIRST — zero-copy (O3):
+	 * hand the payload pointer straight to the listener; GFX/clip process it
+	 * synchronously and must not retain it. */
 	if (!ch->asm_total)
 	{
 		free(ch->asm_buf);
-		ch->asm_buf = payload ? (uint8_t*)malloc(payload) : NULL;
-		if (payload && !ch->asm_buf)
-			return -2;
-		if (payload)
-			memcpy(ch->asm_buf, p + pos, payload);
-		ch->asm_have = payload;
-		ch->asm_total = payload;
-		return deliver(d, ch);
+		ch->asm_buf = NULL;
+		ch->asm_have = ch->asm_total = 0;
+		if (ch->listener && ch->listener->on_data)
+		{
+			d->data_msgs++;
+			ch->listener->on_data(d, ch->id, p + pos, payload, ch->listener->user);
+		}
+		return 0;
 	}
 	if (ch->asm_have + payload > ch->asm_total)
 		return RDP_E_PROTO;

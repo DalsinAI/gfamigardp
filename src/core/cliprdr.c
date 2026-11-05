@@ -28,12 +28,12 @@
 
 static uint16_t ru16(const uint8_t* p)
 {
-	return (uint16_t)(p[0] | (p[1] << 8));
+	return (uint16_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8));
 }
 
 static uint32_t ru32(const uint8_t* p)
 {
-	return (uint32_t)(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24));
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
 static void wu16(uint8_t* p, uint16_t v)
@@ -144,11 +144,11 @@ int rdp_cliprdr_utf16le_to_utf8(char* dst, size_t dst_size, const uint8_t* u16, 
 		u16_len -= 2;
 	while (i + 1 < u16_len)
 	{
-		uint32_t c = (uint32_t)(u16[i] | (u16[i + 1] << 8));
+		uint32_t c = (uint32_t)u16[i] | ((uint32_t)u16[i + 1] << 8);
 		i += 2;
 		if (c >= 0xd800 && c <= 0xdbff && i + 1 < u16_len)
 		{
-			uint32_t lo = (uint32_t)(u16[i] | (u16[i + 1] << 8));
+			uint32_t lo = (uint32_t)u16[i] | ((uint32_t)u16[i + 1] << 8);
 			if (lo >= 0xdc00 && lo <= 0xdfff)
 			{
 				c = 0x10000 + (((c & 0x3ff) << 10) | (lo & 0x3ff));

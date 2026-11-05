@@ -63,6 +63,7 @@ struct rdp_conn
 	uint16_t clip_mcs;           /* MCS channel id, 0 if none */
 	uint8_t clip_on;             /* 1: cliprdr initialised */
 	int32_t clip_amiga_id;       /* last CBD_CURRENTREADID seen (-1 none) */
+	uint64_t clip_poll_us;       /* last local clip poll (O4 throttle) */
 	uint32_t gfx_msgs;           /* complete messages on Microsoft::Windows::RDS::Graphics */
 	uint32_t gfx_bytes;
 	/* RDPGFX ([MS-RDPEGFX]) on that channel: off unless gfx_enable is set before
@@ -74,6 +75,7 @@ struct rdp_conn
 	uint32_t gfx_chan;           /* its DVC channel id */
 	struct rdp_gfx* gfx;         /* surfaces, cache, output buffer (gfx->fb); NULL when off */
 	uint8_t* buf;                /* 64 KiB: what came, a PDU and the start of the next */
+	size_t buf_off;              /* consume offset; compact only when needed (O2) */
 	size_t have;                 /* bytes of it read and not acted on yet */
 	uint8_t* tx;                 /* 4 KiB after it, for what the client sends */
 	/* outbound fast-path input: queued when the socket would block the UI */

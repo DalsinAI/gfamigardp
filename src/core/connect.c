@@ -3,6 +3,7 @@
  * MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #include "connect.h"
+#include "nla.h"
 #include "mcs.h"
 #include "amipr.h"
 #include "klid.h"
@@ -68,7 +69,7 @@ const char* rdp_error_text(int rc)
 		case AMIPR_ETLS: return "The secure connection could not be made.";
 		case AMIPR_ECERT: return "The computer's certificate is not one this Amiga trusts.";
 		case AMIPR_ECANCEL: return "Cancelled.";
-		case RDP_E_UNVERIFIED: return "The password was not sent: the computer's certificate was not checked.";
+		case RDP_E_UNVERIFIED: return "Credentials were not sent: the computer's certificate was not checked.";
 		case RDP_E_REDIRECT: return "The computer redirected the session to another one, which this version does not follow.";
 		case AMIPR_ENOMEM: return "Not enough memory.";
 		case RDP_E_PROTO: return "The computer's answer was not RDP.";
@@ -77,6 +78,7 @@ const char* rdp_error_text(int rc)
 		case RDP_E_DOWNGRADE: return "The computer chose a weaker security than was asked for; not connected.";
 		case RDP_E_MCS: return "The computer refused an MCS step.";
 		case RDP_E_LICENSE: return "The computer asked for a licence exchange, which this version does not do yet.";
+		case RDP_E_NLA: return "Network Level Authentication failed.";
 		default: return "The connection failed.";
 	}
 }

@@ -126,6 +126,8 @@ struct rdp_gfx
 {
 	struct rdp_mem mem;
 	struct rdp_fb fb;             /* the Graphics Output Buffer, for the UI */
+	uint32_t* fb_own_px;          /* real FB pixels when fb.px is aliased (O1a) */
+	uint8_t fb_aliased;          /* 1: fb.px points at a full-size surface */
 	rdp_gfx_send_fn send;
 	void* send_user;
 	struct rdp_zgfx zgfx;
@@ -133,6 +135,7 @@ struct rdp_gfx
 	uint16_t offer_mask;          /* rdp_gfx_build_caps_mask; 0: every set */
 	uint8_t caps_ok, in_frame;
 	uint32_t frame_id, frames_decoded;
+	uint32_t frames_queued;   /* awaiting presentation; FrameAck queueDepth (L4) */
 	uint8_t* scratch;             /* planar planes */
 	size_t scratch_cap;
 	size_t cache_bytes;

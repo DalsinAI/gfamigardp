@@ -227,7 +227,13 @@ int rdp_nla(struct rdp_transport* t, const struct rdp_settings* s, const char* p
 			res->closed_after = res->stage;
 	}
 done:
-	res->lib_error = (const char*)GN_ErrorText(res->gnerr);
+	/* Copy before CloseLibrary: GN_ErrorText may live in the library (M2). */
+	{
+		const char* et = (const char*)GN_ErrorText(res->gnerr);
+		res->lib_error[0] = 0;
+		if (et)
+			strncpy(res->lib_error, et, sizeof(res->lib_error) - 1);
+	}
 	if (in)
 	{
 		memset(in, 0, 2 * GN_CREDSSP_BUFFER);

@@ -43,8 +43,8 @@ int rdp_vc_rx_feed(struct rdp_vc_rx* r, const uint8_t* data, size_t len)
 
 	if (!data || len < 8)
 		return RDP_E_PROTO;
-	total = (uint32_t)(data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24));
-	flags = (uint32_t)(data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24));
+	total = (uint32_t)data[0] | ((uint32_t)data[1] << 8) | ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+	flags = (uint32_t)data[4] | ((uint32_t)data[5] << 8) | ((uint32_t)data[6] << 16) | ((uint32_t)data[7] << 24);
 	chunk = (uint32_t)(len - 8);
 
 	if (flags & RDP_VC_FLAG_FIRST)

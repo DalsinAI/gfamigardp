@@ -28,6 +28,7 @@ static int need_buf(struct rdp_conn* c)
 		c->buf = AllocVec(CONN_BUF + TX_BUF, MEMF_ANY);
 		c->tx = c->buf ? c->buf + CONN_BUF : NULL;
 		c->have = 0;
+		c->buf_off = 0;
 	}
 	return c->buf ? 0 : AMIPR_ENOMEM;
 }
@@ -42,6 +43,9 @@ static int dynvc_send(void* user, const uint8_t* pdu, size_t len)
 
 	if (!c || !c->dynvc_on || !c->dynvc_mcs || !c->tx)
 		return -1;
+	/* Ordered sends (M1): drain queued fast-path input before a blocking
+	 * GFX/DYNVC write so partial input PDUs cannot interleave. */
+	(void)rdp_conn_input_flush(c);
 	/* CHANNEL_CHUNK_LENGTH is 1600 ([MS-RDPBCGR] 2.2.6): fragment if needed */
 	while (sent < len || (len == 0 && sent == 0))
 	{
@@ -186,6 +190,7 @@ static int cliprdr_send(void* user, const uint8_t* pdu, size_t len)
 
 	if (!c || !c->clip_on || !c->clip_mcs || !c->tx)
 		return -1;
+	(void)rdp_conn_input_flush(c);   /* M1: same ordered-send gate as dynvc */
 	while (sent < len || (len == 0 && sent == 0))
 	{
 		size_t chunk_len = len - sent;
@@ -327,15 +332,15 @@ static int confirm(struct rdp_conn* c)
 	return rc < 0 ? rc : 0;
 }
 
-/* the whole PDU of len bytes at the start of c->buf, acted on */
-static int handle(struct rdp_conn* c, size_t len)
+/* the whole PDU of len bytes at base, acted on */
+static int handle(struct rdp_conn* c, const uint8_t* base, size_t len)
 {
 	struct rdp_pdu pdu;
 	struct rdp_share sh;
-	int rc = rdp_pdu_parse(c->buf, len, &c->mr, &pdu);
+	int rc = rdp_pdu_parse(base, len, &c->mr, &pdu);
 	{
 		unsigned i = c->ntrace++ % 8;
-		const uint8_t* src = pdu.len ? pdu.data : c->buf;   /* the raw TPKT when it carried nothing for the session */
+		const uint8_t* src = pdu.len ? pdu.data : base;   /* the raw TPKT when it carried nothing for the session */
 		size_t n = pdu.len ? (pdu.len < 24 ? pdu.len : 24) : 24;
 		c->trace[i].fastpath = (uint8_t)pdu.fastpath;
 		c->trace[i].choice = pdu.choice;
@@ -446,18 +451,29 @@ static int next_pdu(struct rdp_conn* c)
 {
 	for (;;)
 	{
-		int len = rdp_pdu_frame_length(c->buf, c->have, CONN_BUF), n;
+		const uint8_t* base = c->buf + c->buf_off;
+		size_t avail = c->have;
+		int len = rdp_pdu_frame_length(base, avail, CONN_BUF - c->buf_off), n;
 		if (len < 0)
 			return len;
-		if (len > 0 && c->have >= (size_t)len)
+		if (len > 0 && avail >= (size_t)len)
 		{
-			int rc = handle(c, (size_t)len);
+			int rc = handle(c, base, (size_t)len);
 			c->have -= (size_t)len;
-			if (c->have)
-				memmove(c->buf, c->buf + len, c->have);
+			c->buf_off += (size_t)len;   /* consume without memmove (O2) */
+			if (!c->have)
+				c->buf_off = 0;
 			return rc < 0 ? rc : 1;
 		}
-		n = rdp_transport_read_some(&c->t, c->buf + c->have, CONN_BUF - c->have);
+		/* Need more bytes: compact when the free tail is tight. */
+		if (c->buf_off && (CONN_BUF - c->buf_off - c->have) < 2048)
+		{
+			if (c->have)
+				memmove(c->buf, c->buf + c->buf_off, c->have);
+			c->buf_off = 0;
+		}
+		n = rdp_transport_read_some(&c->t, c->buf + c->buf_off + c->have,
+		                           CONN_BUF - c->buf_off - c->have);
 		if (n == AMIPR_EAGAIN)
 			return 0;
 		if (n == AMIPR_ECLOSED)
@@ -475,7 +491,7 @@ int rdp_conn_ready(const struct rdp_conn* c)
 		return 0;
 	if (rdp_transport_pending((struct rdp_transport*)&c->t) > 0)
 		return 1;
-	len = rdp_pdu_frame_length(c->buf, c->have, CONN_BUF);
+	len = rdp_pdu_frame_length(c->buf + c->buf_off, c->have, CONN_BUF - c->buf_off);
 	return len < 0 || (len > 0 && c->have >= (size_t)len);
 }
 
@@ -520,7 +536,15 @@ int rdp_conn_poll(struct rdp_conn* c, int max)
 	(void)rdp_conn_input_flush(c);   /* drain queued fast-path input first */
 	rdp_conn_bind_dynvc(c);
 	rdp_conn_bind_cliprdr(c);
-	(void)rdp_conn_clip_poll_local(c);
+	/* O4: clipboard.device poll at most every ~250 ms */
+	{
+		uint64_t now = amipr_monotonic_us();
+		if (now - c->clip_poll_us >= 250000ull)
+		{
+			c->clip_poll_us = now;
+			(void)rdp_conn_clip_poll_local(c);
+		}
+	}
 	while (c->live && max-- > 0)
 	{
 		rc = next_pdu(c);
@@ -556,6 +580,7 @@ void rdp_conn_close(struct rdp_conn* c)
 		c->buf = NULL;
 		c->tx = NULL;
 		c->have = 0;
+		c->buf_off = 0;
 	}
 }
 

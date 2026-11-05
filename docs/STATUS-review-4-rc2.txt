@@ -1,0 +1,33 @@
+STATUS — re-review fixes → v0.1.0-rc2 (Sacredtrees / Team 6)
+2026-11-05 Europe/London
+
+HIGH
+  H1 — ct_connect copies arc_have/arc_logon_id/arc_random; wipe after use; host test_ct_arc_copy
+  H2 — CT_CMD_QUIT sets quit; do_connect returns → task exits (no 30s hang under live task)
+  H3 — ct_shutdown Forbid final teardown; wait running==0; never free ui_port under the task
+
+MED
+  M1 — dynvc/cliprdr send flush in_q first (ordered NB vs blocking)
+  M2 — nla copies GN_ErrorText into lib_error[96] before CloseLibrary
+  M3 — amipr_tcp_obtain retries then Obtain+Close reclaim on fail
+  M4 — ARC cookie uses same TLS-verified gate as password (RDP_E_UNVERIFIED)
+  M5 — ResetGraphics drops surfaces/cache; surface/FB max 8192 / 16M pixels
+
+LOW
+  L1 — uint32 casts before shifts (drdynvc/cliprdr/vchan)
+  L2 — error texts: UNVERIFIED wording + RDP_E_NLA
+  L3 — MapSurfaceToOutput rejects ox/oy > INT32_MAX
+  L4 — FrameAck after blit with real frames_queued (capped at 2)
+
+OPTS
+  O1a — skip FB copy when one full-size mapped surface (alias)
+  O2 — consume-offset recv (no per-PDU memmove)
+  O3 — zero-copy unfragmented DRDYNVC DATA
+  O4 — clipboard.device poll ≤ ~250 ms
+  O5 — already dirty-only flush (confirmed)
+  O1b/c — deferred (Progressive coefs needed for later passes)
+
+gfopenntlm 1.1.1 — see that release.
+
+Host: test_arc, test_ct_arc_copy, test_cliprdr, test_drdynvc, test_gfx, test_input,
+test_klid, test_knownhosts, test_progressive green. Stove os32-gcc16; lab:gfamigardp-ui only.

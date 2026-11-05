@@ -100,8 +100,12 @@ int rdp_gfx_init(struct rdp_gfx* g, const struct rdp_mem* mem, uint16_t w, uint1
 	return 0;
 }
 
+static void gfx_unalias_fb(struct rdp_gfx* g);
+
 static void surface_delete(struct rdp_gfx* g, struct rdp_gfx_surface* sf)
 {
+	if (g->fb_aliased && g->fb.px == sf->px)
+		gfx_unalias_fb(g);
 	rdp_progressive_free(&sf->prog, &g->mem);
 	rdp_mem_free(&g->mem, sf->px);
 	memset(sf, 0, sizeof(*sf));
@@ -118,9 +122,41 @@ static void cache_evict(struct rdp_gfx* g, uint16_t slot)
 	memset(e, 0, sizeof(*e));
 }
 
+/* Undo O1a FB alias before surface/FB ownership changes. */
+static void gfx_unalias_fb(struct rdp_gfx* g)
+{
+	if (g->fb_aliased && g->fb_own_px)
+	{
+		g->fb.px = g->fb_own_px;
+		g->fb_own_px = NULL;
+		g->fb_aliased = 0;
+	}
+}
+
+/* Drop every surface and cache slot (Reset Graphics; M5). */
+static void gfx_drop_stale(struct rdp_gfx* g)
+{
+	int i;
+	gfx_unalias_fb(g);
+	for (i = 0; i < RDP_GFX_MAX_SURFACES; i++)
+		if (g->surf[i].used)
+			surface_delete(g, &g->surf[i]);
+	if (g->cache)
+		for (i = 1; i <= RDP_GFX_CACHE_SLOTS; i++)
+			cache_evict(g, (uint16_t)i);
+	g->in_frame = 0;
+	g->frame_id = 0;
+	g->frames_queued = 0;
+}
+
+/* Cap surface/FB pixels so w*h*4 cannot approach 4 GiB on 32-bit (M5). */
+#define RDP_GFX_MAX_DIM 8192u
+#define RDP_GFX_MAX_PIXELS (16u * 1024u * 1024u)  /* 64 MiB at 32 bpp */
+
 void rdp_gfx_free(struct rdp_gfx* g)
 {
 	int i;
+	gfx_unalias_fb(g);
 	for (i = 0; i < RDP_GFX_MAX_SURFACES; i++)
 		if (g->surf[i].used)
 			surface_delete(g, &g->surf[i]);
@@ -196,9 +232,14 @@ static int send_frame_ack(struct rdp_gfx* g, uint32_t frame_id)
 	struct rdp_stream s;
 	rdp_s_init(&s, buf, sizeof(buf));
 	header(&s, RDPGFX_CMDID_FRAMEACKNOWLEDGE, sizeof(buf));
-	/* One frame in flight: a slow 68040 asks the server to ease off
-	 * ([MS-RDPEGFX] 2.2.2.13) instead of QUEUE_DEPTH_UNAVAILABLE. */
-	rdp_s_u32le(&s, 1);
+	/* Real queue depth after the blit (L4). Cap at 2 so a slow 68040 still
+	 * asks the server to ease off ([MS-RDPEGFX] 2.2.2.13). */
+	{
+		uint32_t depth = g->frames_queued;
+		if (depth > 2)
+			depth = 2;
+		rdp_s_u32le(&s, depth);
+	}
 	rdp_s_u32le(&s, frame_id);
 	rdp_s_u32le(&s, g->frames_decoded);
 	return send_pdu(g, buf, s.pos);
@@ -206,9 +247,37 @@ static int send_frame_ack(struct rdp_gfx* g, uint32_t frame_id)
 
 void rdp_gfx_flush(struct rdp_gfx* g)
 {
-	int i;
+	int i, mapped = 0, full_i = -1;
 	uint16_t k;
 	rdp_fb_lock(&g->fb);
+	/* O1a: one surface mapped 1:1 over the whole FB — alias, skip the copy. */
+	for (i = 0; i < RDP_GFX_MAX_SURFACES; i++)
+	{
+		struct rdp_gfx_surface* sf = &g->surf[i];
+		if (!sf->used || !sf->mapped)
+			continue;
+		mapped++;
+		if (sf->ox == 0 && sf->oy == 0 && sf->w == g->fb.w && sf->h == g->fb.h && sf->px)
+			full_i = i;
+	}
+	if (mapped == 1 && full_i >= 0)
+	{
+		struct rdp_gfx_surface* sf = &g->surf[full_i];
+		if (!g->fb_aliased)
+		{
+			g->fb_own_px = g->fb.px;
+			g->fb_aliased = 1;
+		}
+		g->fb.px = sf->px;
+		g->fb.stride = sf->w;
+		for (k = 0; k < sf->dirty.n; k++)
+			rdp_dirty_add(&g->fb.dirty, &sf->dirty.r[k], g->fb.w, g->fb.h);
+		rdp_dirty_clear(&sf->dirty);
+		rdp_fb_unlock(&g->fb);
+		return;
+	}
+	if (g->fb_aliased)
+		gfx_unalias_fb(g);
 	for (i = 0; i < RDP_GFX_MAX_SURFACES; i++)
 	{
 		struct rdp_gfx_surface* sf = &g->surf[i];
@@ -509,6 +578,9 @@ static int create_surface(struct rdp_gfx* g, struct rdp_stream* s)
 	int i;
 	if (s->err || !w || !h || (fmt != GFX_PIXEL_FORMAT_XRGB_8888 && fmt != GFX_PIXEL_FORMAT_ARGB_8888))
 		return RDP_GFX_E_PROTO;
+	if (w > RDP_GFX_MAX_DIM || h > RDP_GFX_MAX_DIM ||
+	    (uint32_t)w * (uint32_t)h > RDP_GFX_MAX_PIXELS)
+		return RDP_GFX_E_PROTO;
 	if ((sf = surface_find(g, id)) != NULL)
 		surface_delete(g, sf);
 	for (i = 0; i < RDP_GFX_MAX_SURFACES && !sf; i++)
@@ -554,8 +626,10 @@ static int handle(struct rdp_gfx* g, uint16_t cmd, struct rdp_stream* s)
 	case RDPGFX_CMDID_RESETGRAPHICS:
 	{
 		uint32_t w = rdp_s_get_u32le(s), h = rdp_s_get_u32le(s), mons = rdp_s_get_u32le(s);
-		if (s->err || !w || !h || w > 32766 || h > 32766 || mons > 16)
+		if (s->err || !w || !h || w > RDP_GFX_MAX_DIM || h > RDP_GFX_MAX_DIM ||
+		    w * h > RDP_GFX_MAX_PIXELS || mons > 16)
 			return RDP_GFX_E_PROTO;
+		gfx_drop_stale(g);   /* M5: surfaces/cache are not valid across a reset */
 		return rdp_fb_resize(&g->fb, (uint16_t)w, (uint16_t)h) < 0 ? RDP_GFX_E_NOMEM : 0;
 	}
 	case RDPGFX_CMDID_CREATESURFACE:
@@ -576,6 +650,9 @@ static int handle(struct rdp_gfx* g, uint16_t cmd, struct rdp_stream* s)
 			return RDP_GFX_E_PROTO;
 		sf->ox = rdp_s_get_u32le(s);
 		sf->oy = rdp_s_get_u32le(s);
+		/* Offsets feed signed blit math; reject absurd values (L3). */
+		if (sf->ox > 0x7FFFFFFFu || sf->oy > 0x7FFFFFFFu)
+			return RDP_GFX_E_PROTO;
 		sf->mapped = 1;
 		all.x0 = all.y0 = 0;
 		all.x1 = sf->w;
@@ -587,6 +664,7 @@ static int handle(struct rdp_gfx* g, uint16_t cmd, struct rdp_stream* s)
 		rdp_s_skip(s, 4);   /* timestamp */
 		g->frame_id = rdp_s_get_u32le(s);
 		g->in_frame = 1;
+		g->frames_queued++;
 		return s->err ? RDP_GFX_E_PROTO : 0;
 	case RDPGFX_CMDID_ENDFRAME:
 	{
@@ -596,11 +674,17 @@ static int handle(struct rdp_gfx* g, uint16_t cmd, struct rdp_stream* s)
 		g->in_frame = 0;
 		g->frames_decoded++;
 		g->st.frames++;
-		rdp_gfx_flush(g);
+		rdp_gfx_flush(g);   /* blit before ack (L4) */
 		rdp_fb_lock(&g->fb);
 		g->fb.frames++;
 		rdp_fb_unlock(&g->fb);
-		return send_frame_ack(g, id);
+		/* Ack reports depth including this just-presented frame, then drop it. */
+		{
+			int rc = send_frame_ack(g, id);
+			if (g->frames_queued)
+				g->frames_queued--;
+			return rc;
+		}
 	}
 	case RDPGFX_CMDID_SOLIDFILL:
 		return solid_fill(g, s);

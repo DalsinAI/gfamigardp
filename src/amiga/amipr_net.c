@@ -266,8 +266,24 @@ long amipr_tcp_release(int s)
 int amipr_tcp_obtain(long id)
 {
 	LONG s;
+	int i;
 	if (id < 0 || amipr_net_open() != AMIPR_OK)
 		return AMIPR_ENET;
+	/* A transient ObtainSocket failure after ReleaseSocket would orphan the
+	 * fd until another Obtain succeeds. Retry, then reclaim+close (M3). */
+	for (i = 0; i < 3; i++)
+	{
+		s = ObtainSocket(id, AF_INET, SOCK_STREAM, 0);
+		if (s >= 0)
+			return (int)s;
+		if (i < 2)
+			amipr_sleep_us(20000);
+	}
 	s = ObtainSocket(id, AF_INET, SOCK_STREAM, 0);
-	return s >= 0 ? (int)s : AMIPR_ENET;
+	if (s >= 0)
+	{
+		CloseSocket(s);
+		return AMIPR_ENET;
+	}
+	return AMIPR_ENET;
 }

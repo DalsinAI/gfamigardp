@@ -3,11 +3,10 @@
  * written (docs/DESIGN.md 6) it shows a test pattern at the remote size:
  * a gradient, a grid, two mock windows, a grey ramp and colour bars.
  *
- * Drawing, best first (DESIGN.md 8): on a true-colour screen 24-bit rows
- * through cybergraphics.library's WritePixelArray (RECTFMT_RGB); on a
- * palette screen a 3x3x3 colour cube of pens (ObtainBestPen) with a 4x4
- * ordered dither, through graphics.library's WriteChunkyPixels (V40).
- * The gfopengpu stream comes in front of both once the session draws.
+ * Drawing, best first (DESIGN.md Drawing): gfopengpu PIXELS/COPY when
+ * OGPU_Query allows and LockBitMapTags gives the BitMap address; else on a
+ * true-colour screen WritePixelArray (RECTFMT_ARGB/RGB); on a palette
+ * screen a 3x3x3 cube with ordered dither via WriteChunkyPixels (V40).
  * MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #include "ui.h"
@@ -24,18 +23,70 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <utility/tagitem.h>
+#include <graphics/layers.h>
+#include <gfopengpu/gfopengpu.h>
+#include <gfopengpu/stream.h>
+#include <proto/gfopengpu.h>
+
+
 /* cybergraphics.library by its vectors (interface facts from its
  * autodoc): WritePixelArray -126, GetCyberMapAttr -96 */
 static struct Library* CyberGfxBase;
+struct Library* OpenGPUBase; /* also used by ogpu_yuv.c */
 #define CGX_WPA(src, sx, sy, mod, rp, dx, dy, w, h, fmt) \
 	LP10(0x7e, ULONG, WritePixelArray, APTR, (src), a0, UWORD, (sx), d0, UWORD, (sy), d1, UWORD, (mod), d2, \
 	     struct RastPort*, (rp), a1, UWORD, (dx), d3, UWORD, (dy), d4, UWORD, (w), d5, UWORD, (h), d6, \
 	     UBYTE, (fmt), d7, , CyberGfxBase)
 #define CGX_MAPATTR(bm, a) LP2(0x60, ULONG, GetCyberMapAttr, struct BitMap*, (bm), a0, ULONG, (a), d0, , CyberGfxBase)
+/* LockBitMapTagList -168, UnLockBitMap -174 (cybergraphics.library) */
+#define CGX_LOCKBM(bm, tags) LP2(0xa8, APTR, LockBitMapTagList, struct BitMap*, (bm), a0, struct TagItem*, (tags), a1, , CyberGfxBase)
+#define CGX_UNLOCKBM(h) LP1NR(0xae, UnLockBitMap, APTR, (h), a0, , CyberGfxBase)
 #define CYBRMATTR_DEPTH 0x80000007UL
 #define CYBRMATTR_ISCYBERGFX 0x80000008UL
+#define CYBRMATTR_PIXFMT 0x80000004UL
+#define CYBRMATTR_XMOD 0x80000001UL
 #define RECTFMT_RGB 0
 #define RECTFMT_ARGB 2
+#define LBMI_BYTESPERROW 0x84001006UL
+#define LBMI_BASEADDRESS 0x84001007UL
+#define LBMI_PIXFMT 0x84001004UL
+#define PIXFMT_RGB16 5UL
+#define PIXFMT_ARGB32 11UL
+#define PIXFMT_BGRA32 12UL
+#define PIXFMT_RGBA32 13UL
+
+static int s_ogpu_pixels; /* 1: PIXELS ok for ARGB32 target */
+static int s_ogpu_copy;   /* 1: COPY ok for ARGB32 target */
+static int s_ogpu_queried; /* 1: PIXELS/COPY Query done (base may be shared with YUV) */
+static int s_ogpu_fmt;    /* OGPU_FMT_* of the locked BitMap when known */
+
+static void ogpu_ensure(void)
+{
+	ULONG q;
+	if (s_ogpu_queried)
+		return;
+	if (!OpenGPUBase)
+		OpenGPUBase = OpenLibrary((CONST_STRPTR)OPENGPU_NAME, OPENGPU_VERSION);
+	if (!OpenGPUBase)
+		return;
+	q = OGPU_Query(OGPU_OP_PIXELS, OGPU_FMT_ARGB32);
+	s_ogpu_pixels = OGPU_ANSWER(q) != OGPU_NONE;
+	q = OGPU_Query(OGPU_OP_COPY, OGPU_FMT_ARGB32);
+	s_ogpu_copy = OGPU_ANSWER(q) != OGPU_NONE;
+	s_ogpu_queried = 1;
+	/* Keep the base even when blit Query fails: ogpu_yuv may still use YUV. */
+}
+
+/* Map a CyberGraphX PIXFMT to an OGPU surface format; 0 if unsupported. */
+static int ogpu_fmt_of_pixfmt(ULONG pf)
+{
+	if (pf == PIXFMT_ARGB32 || pf == PIXFMT_BGRA32 || pf == PIXFMT_RGBA32)
+		return OGPU_FMT_ARGB32;
+	if (pf == PIXFMT_RGB16)
+		return OGPU_FMT_RGB565;
+	return 0;
+}
 
 static struct ColorMap* s_cm;
 static LONG s_pens[27];
@@ -82,6 +133,10 @@ void desktop_free(void)
 	if (CyberGfxBase)
 		CloseLibrary(CyberGfxBase);
 	CyberGfxBase = NULL;
+	if (OpenGPUBase)
+		CloseLibrary(OpenGPUBase);
+	OpenGPUBase = NULL;
+	s_ogpu_pixels = s_ogpu_copy = s_ogpu_queried = 0;
 }
 
 /* 0..255 to 0..2 with the dither threshold t (0..15) */
@@ -196,6 +251,14 @@ void desktop_blit(struct Window* win, int x0, int y0, int w, int h, const struct
 	int i, truecolour;
 	UBYTE* row = NULL;
 	int vx1, vy1;
+	APTR lock = NULL;
+	UBYTE* base = NULL;
+	ULONG bpr = 0, pixfmt = 0;
+	int ogpu_fmt = 0, use_ogpu = 0;
+	int layer_ox = 0, layer_oy = 0;
+	ULONG stream[8 + 64 * 7];
+	ULONG *sw;
+	ULONG fence = 0;
 
 	if (w <= 0 || h <= 0 || !fb || !fb->px)
 		return;
@@ -206,6 +269,104 @@ void desktop_blit(struct Window* win, int x0, int y0, int w, int h, const struct
 	if (vx1 > fb->w) vx1 = fb->w;
 	if (vy1 > fb->h) vy1 = fb->h;
 	truecolour = truecolour_rp(rp);
+	ogpu_ensure();
+	if (truecolour && OpenGPUBase && (s_ogpu_pixels || s_ogpu_copy) && CyberGfxBase && n > 0 && n <= 64)
+	{
+		struct TagItem tags[4];
+		tags[0].ti_Tag = LBMI_BASEADDRESS; tags[0].ti_Data = (ULONG)&base;
+		tags[1].ti_Tag = LBMI_BYTESPERROW; tags[1].ti_Data = (ULONG)&bpr;
+		tags[2].ti_Tag = LBMI_PIXFMT; tags[2].ti_Data = (ULONG)&pixfmt;
+		tags[3].ti_Tag = TAG_DONE;
+		lock = CGX_LOCKBM(rp->BitMap, tags);
+		if (lock && base && bpr)
+		{
+			ogpu_fmt = ogpu_fmt_of_pixfmt(pixfmt);
+			if (!ogpu_fmt)
+				ogpu_fmt = OGPU_FMT_ARGB32; /* hope: many CGX 32-bit screens */
+			if (rp->Layer)
+			{
+				layer_ox = rp->Layer->bounds.MinX;
+				layer_oy = rp->Layer->bounds.MinY;
+			}
+			/* Prefer COPY when both ends are ARGB32; else PIXELS from ARGB FB. */
+			if (ogpu_fmt == OGPU_FMT_ARGB32 && s_ogpu_copy)
+				use_ogpu = 2;
+			else if (s_ogpu_pixels)
+				use_ogpu = 1;
+		}
+		if (!use_ogpu && lock)
+		{
+			CGX_UNLOCKBM(lock);
+			lock = NULL;
+			base = NULL;
+		}
+	}
+	if (use_ogpu)
+	{
+		sw = stream;
+		*sw++ = OGPU_HDR(OGPU_OP_SURFACE, 6);
+		*sw++ = 0;
+		*sw++ = (ULONG)base;
+		*sw++ = bpr;
+		*sw++ = OGPU_XY((int)(bpr / (ogpu_fmt == OGPU_FMT_RGB565 ? 2 : 4)),
+		                (int)(rp->BitMap->Rows > 0 ? rp->BitMap->Rows : h + layer_oy));
+		*sw++ = (ULONG)ogpu_fmt;
+		if (use_ogpu == 2)
+		{
+			*sw++ = OGPU_HDR(OGPU_OP_SURFACE, 6);
+			*sw++ = 1;
+			*sw++ = (ULONG)fb->px;
+			*sw++ = (ULONG)fb->stride * 4UL;
+			*sw++ = OGPU_XY(fb->w, fb->h);
+			*sw++ = OGPU_FMT_ARGB32;
+		}
+		*sw++ = OGPU_HDR(OGPU_OP_TARGET, 2);
+		*sw++ = 0;
+		for (i = 0; i < n; i++)
+		{
+			int rx0 = rects[i].x0, ry0 = rects[i].y0, rx1 = rects[i].x1, ry1 = rects[i].y1;
+			int dx, dy, bw, bh;
+			if (rx0 < ox) rx0 = ox;
+			if (ry0 < oy) ry0 = oy;
+			if (rx1 > vx1) rx1 = vx1;
+			if (ry1 > vy1) ry1 = vy1;
+			if (rx0 >= rx1 || ry0 >= ry1)
+				continue;
+			dx = x0 + (rx0 - ox) + layer_ox;
+			dy = y0 + (ry0 - oy) + layer_oy;
+			bw = rx1 - rx0;
+			bh = ry1 - ry0;
+			if (use_ogpu == 2)
+			{
+				*sw++ = OGPU_HDR(OGPU_OP_COPY, 5);
+				*sw++ = 1;
+				*sw++ = OGPU_XY(rx0, ry0);
+				*sw++ = OGPU_XY(dx, dy);
+				*sw++ = OGPU_XY(bw, bh);
+			}
+			else
+			{
+				const uint32_t* src = fb->px + (size_t)ry0 * fb->stride + (size_t)rx0;
+				*sw++ = OGPU_HDR(OGPU_OP_PIXELS, 7);
+				*sw++ = (ULONG)src;
+				*sw++ = (ULONG)fb->stride * 4UL;
+				*sw++ = OGPU_FMT_ARGB32;
+				*sw++ = 0;
+				*sw++ = OGPU_XY(dx, dy);
+				*sw++ = OGPU_XY(bw, bh);
+			}
+		}
+		*sw++ = OGPU_HDR(OGPU_OP_FENCE, 2);
+		*sw++ = 1;
+		if (OGPU_Submit(stream, (ULONG)(sw - stream), &fence) == OGPU_OK)
+			OGPU_Wait(fence);
+		else
+			use_ogpu = 0; /* fall through to WPA for this frame */
+		CGX_UNLOCKBM(lock);
+		if (use_ogpu)
+			return;
+		/* Submit failed: fall back to WritePixelArray below. */
+	}
 	if (!truecolour)
 	{
 		get_pens(win->WScreen);

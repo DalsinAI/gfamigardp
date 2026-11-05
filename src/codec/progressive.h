@@ -47,6 +47,8 @@ struct rdp_prog_stats
 	uint32_t simple, first, upgrade, skipped, nomem;
 	uint32_t view_skip;            /* idwt/YCbCr skipped: tile outside the view clip */
 	uint32_t painted;              /* tiles written by rdp_progressive_paint */
+	uint32_t trimmed;              /* tiles whose coefs were freed by trim */
+	uint32_t yuv_gpu;              /* tiles colour-converted via OpenGPU YUV */
 };
 
 /* Exclusive surface clip for decode/paint; NULL or zero-size = whole surface. */
@@ -69,6 +71,20 @@ int rdp_progressive_paint(struct rdp_prog_surface* ps, const struct rdp_mem* mem
                           uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1,
                           rdp_prog_rect_fn on_rect, void* user, struct rdp_prog_stats* st);
 void rdp_progressive_free(struct rdp_prog_surface* ps, const struct rdp_mem* mem);
+
+
+/* Optional colour convert after idwt (OpenGPU YUV pilot). Return 1 if the
+ * hook wrote [x0,y0)..[x1,y1) into px; 0 to use the CPU RFX matrix. */
+typedef int (*rdp_prog_ycbcr_fn)(void* user, uint32_t* px, uint16_t w, uint16_t h,
+                                 const int32_t* Y, const int32_t* Cb, const int32_t* Cr,
+                                 int tile_x, int tile_y, int x0, int y0, int x1, int y1);
+void rdp_progressive_set_ycbcr(rdp_prog_ycbcr_fn fn, void* user);
+
+/* Free coef/sign for tiles completely outside keep_*; painted tiles keep their
+ * pixels in the surface. Safe under memory pressure / far pans (O1b). */
+int rdp_progressive_trim(struct rdp_prog_surface* ps, const struct rdp_mem* mem,
+                         uint16_t keep_x0, uint16_t keep_y0, uint16_t keep_x1, uint16_t keep_y1,
+                         struct rdp_prog_stats* st);
 
 /* Exposed for the host tests. */
 int rdp_rlgr1_decode(const uint8_t* p, size_t len, int16_t* out, int n);

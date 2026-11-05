@@ -82,7 +82,7 @@ done
 CFLAGS="$CPUFLAGS $INC -D__AMIGA__ -DAMIGAOS3 -noixemul -std=gnu99 -O2 \
   -fno-delete-null-pointer-checks -fno-late-combine-instructions -Wall -Wextra \
   -I$HERE/src/amiga -I$HERE/src/crypto -I$HERE/src/core -I$HERE/src/codec -I$HERE/src/ui \
-  -I$GFOPENTLS/include -I$OLUI/include -I$GN/include $GNFLAGS"
+  -I$DEPS/gfopensdk/Include -I$GFOPENTLS/include -I$OLUI/include -I$GN/include $GNFLAGS"
 
 mkdir -p "$WORK/obj" "$OUT/tools" "$OUT/tests" "$OUT/lib" "$OUT/Themes" "$OUT/Env/GFOpenGadTools"
 LOG="$OUT/warnings.log"
@@ -90,7 +90,7 @@ LOG="$OUT/warnings.log"
 
 OBJS=""
 for f in src/amiga/amipr_init.c src/amiga/amipr_time.c src/amiga/amipr_atomic.c src/amiga/amipr_wait.c \
-         src/amiga/amipr_dos.c src/amiga/amipr_net.c src/amiga/amipr_crypto.c src/amiga/amipr_tls.c src/amiga/amipr_clip.c src/amiga/conntask.c \
+         src/amiga/amipr_dos.c src/amiga/amipr_net.c src/amiga/amipr_crypto.c src/amiga/amipr_tls.c src/amiga/amipr_clip.c src/amiga/ogpu_yuv.c src/amiga/conntask.c \
          src/crypto/x509.c src/core/x224.c src/core/transport.c src/core/connect.c src/core/nla.c src/core/mcs.c src/core/utf16.c src/core/pdu.c src/core/input.c src/core/session.c src/core/arc.c src/core/knownhosts.c src/core/vchan.c src/core/drdynvc.c src/core/cliprdr.c src/core/klid.c src/core/rdpgfx.c src/codec/gfx_fb.c src/codec/zgfx.c src/codec/planar.c src/codec/progressive.c src/codec/clearcodec.c; do
     o="$WORK/obj/$(basename "$f" .c).o"
     "$CC" $CFLAGS -c "$HERE/$f" -o "$o" 2>>"$LOG"

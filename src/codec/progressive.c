@@ -7,6 +7,16 @@
 #include <string.h>
 #include "progressive.h"
 
+static rdp_prog_ycbcr_fn s_ycbcr_fn;
+static void* s_ycbcr_user;
+
+void rdp_progressive_set_ycbcr(rdp_prog_ycbcr_fn fn, void* user)
+{
+	s_ycbcr_fn = fn;
+	s_ycbcr_user = user;
+}
+
+
 /* block types, 2.2.4.2.1 */
 #define WBT_SYNC          0xCCC0
 #define WBT_FRAME_BEGIN   0xCCC1
@@ -199,8 +209,12 @@ int rdp_rlgr1_decode(const uint8_t* p, size_t len, int16_t* out, int n)
 			while (get_bits(&b, 1) == 0)
 			{
 				int z = 1 << k;
-				while (z-- > 0 && o < n)
-					out[o++] = 0;
+				if (z > n - o) z = n - o;
+				if (z > 0)
+				{
+					memset(out + o, 0, (size_t)z * sizeof(int16_t));
+					o += z;
+				}
 				k = update_param(&kp, UP_GR);
 				if (o >= n || bits_over(&b))
 					break;
@@ -208,8 +222,13 @@ int rdp_rlgr1_decode(const uint8_t* p, size_t len, int16_t* out, int n)
 			if (o >= n)
 				break;
 			run = get_bits(&b, k);
-			while (run-- > 0 && o < n)
-				out[o++] = 0;
+			if (run > (uint32_t)(n - o))
+				run = (uint32_t)(n - o);
+			if (run)
+			{
+				memset(out + o, 0, (size_t)run * sizeof(int16_t));
+				o += (int)run;
+			}
 			if (o >= n)
 				break;
 			sign = get_bits(&b, 1);
@@ -302,20 +321,26 @@ static void idwt1(const int32_t* L, int ls, const int32_t* H, int hs, int nl, in
                   int32_t* X, int xs, int nout, int32_t* t)
 {
 	int n, total = nl + nhe;
-#define HH(i) ((i) < nh ? H[(i) * hs] : 0)
+	/* Even: L − ((H[n-1] + H[n] + 1) >> 1), H padded with 0 past nh. */
 	for (n = 0; n < nl; n++)
 	{
-		int32_t hp = HH(n > 0 ? n - 1 : 0), hn = HH(n < nhe ? n : nhe - 1);
+		int i0 = n > 0 ? n - 1 : 0, i1 = n < nhe ? n : (nhe > 0 ? nhe - 1 : 0);
+		int32_t hp = i0 < nh ? H[i0 * hs] : 0;
+		int32_t hn = i1 < nh ? H[i1 * hs] : 0;
 		t[2 * n] = L[n * ls] - ((hp + hn + 1) >> 1);
 	}
 	for (n = 0; n < nhe; n++)
 	{
 		int32_t a = t[2 * n], b = 2 * n + 2 < total ? t[2 * n + 2] : t[2 * n];
-		t[2 * n + 1] = 2 * HH(n) + ((a + b) >> 1);
+		int32_t hn = n < nh ? H[n * hs] : 0;
+		t[2 * n + 1] = 2 * hn + ((a + b) >> 1);
 	}
-#undef HH
-	for (n = 0; n < nout; n++)
-		X[n * xs] = t[n];
+	/* Contiguous output (horizontal pass): one memcpy beats n stores. */
+	if (xs == 1)
+		memcpy(X, t, (size_t)nout * sizeof(int32_t));
+	else
+		for (n = 0; n < nout; n++)
+			X[n * xs] = t[n];
 }
 
 /* One 2D level: LL (a x a, stride las), HL (b wide, a high), LH (a wide,
@@ -448,13 +473,6 @@ static struct rdp_prog_tile* tile_state(struct ctx* c, uint16_t xi, uint16_t yi,
 	return *slot;
 }
 
-static uint8_t clamp8(int32_t v)
-{
-	if ((uint32_t)v <= 255u)
-		return (uint8_t)v;
-	return (uint8_t)(v < 0 ? 0 : 255);
-}
-
 static int tile_in_clip(const struct ctx* c, uint16_t xi, uint16_t yi)
 {
 	int32_t tx = (int32_t)xi * 64, ty = (int32_t)yi * 64, tx1 = tx + 64, ty1 = ty + 64;
@@ -520,21 +538,35 @@ static void render(struct ctx* c, struct rdp_prog_tile* t, uint16_t xi, uint16_t
 		if (y1 > c->h) y1 = c->h;
 		if (x0 >= x1 || y0 >= y1)
 			continue;
-		for (y = y0; y < y1; y++)
+		if (s_ycbcr_fn &&
+		    s_ycbcr_fn(s_ycbcr_user, c->px, c->w, c->h,
+		               c->ycc, c->ycc + RDP_PROG_COEFS, c->ycc + 2 * RDP_PROG_COEFS,
+		               (int)tx, (int)ty, (int)x0, (int)y0, (int)x1, (int)y1))
 		{
-			uint32_t* dst = c->px + (size_t)y * c->w + (size_t)x0;
-			const int32_t* Y = c->ycc + (y - ty) * 64 + (x0 - tx);
-			const int32_t* Cb = Y + RDP_PROG_COEFS;
-			const int32_t* Cr = Cb + RDP_PROG_COEFS;
-			int n = (int)(x1 - x0), i;
-			/* [MS-RDPRFX] 3.1.8.2.5: Y + 128; the matrix in 16.16. */
-			for (i = 0; i < n; i++)
+			c->st->yuv_gpu++;
+		}
+		else
+		{
+			/* [MS-RDPRFX] 3.1.8.2.5: Y + 128; matrix in 16.16. Hot path for 68040. */
+			for (y = y0; y < y1; y++)
 			{
-				int32_t yy = Y[i] + 128, cb = Cb[i], cr = Cr[i];
-				int32_t R = yy + ((cr * 91916 + 32768) >> 16);
-				int32_t G = yy - ((cb * 22527 + cr * 46819 + 32768) >> 16);
-				int32_t B = yy + ((cb * 115993 + 32768) >> 16);
-				dst[i] = 0xFF000000u | ((uint32_t)clamp8(R) << 16) | ((uint32_t)clamp8(G) << 8) | clamp8(B);
+				uint32_t* dst = c->px + (size_t)y * c->w + (size_t)x0;
+				const int32_t* Y = c->ycc + (y - ty) * 64 + (x0 - tx);
+				const int32_t* Cb = Y + RDP_PROG_COEFS;
+				const int32_t* Cr = Cb + RDP_PROG_COEFS;
+				int n = (int)(x1 - x0), i;
+				for (i = 0; i < n; i++)
+				{
+					int32_t yy = Y[i] + 128, cb = Cb[i], cr = Cr[i];
+					int32_t R = yy + ((cr * 91916 + 32768) >> 16);
+					int32_t G = yy - ((cb * 22527 + cr * 46819 + 32768) >> 16);
+					int32_t B = yy + ((cb * 115993 + 32768) >> 16);
+					uint32_t r = (uint32_t)R, g = (uint32_t)G, b = (uint32_t)B;
+					if (r > 255u) r = (uint32_t)(R < 0 ? 0 : 255);
+					if (g > 255u) g = (uint32_t)(G < 0 ? 0 : 255);
+					if (b > 255u) b = (uint32_t)(B < 0 ? 0 : 255);
+					dst[i] = 0xFF000000u | (r << 16) | (g << 8) | b;
+				}
 			}
 		}
 		if (c->on_rect)
@@ -910,6 +942,41 @@ int rdp_progressive_paint(struct rdp_prog_surface* ps, const struct rdp_mem* mem
 		}
 	rdp_mem_free(mem, buf);
 	return n;
+}
+
+
+int rdp_progressive_trim(struct rdp_prog_surface* ps, const struct rdp_mem* mem,
+                         uint16_t keep_x0, uint16_t keep_y0, uint16_t keep_x1, uint16_t keep_y1,
+                         struct rdp_prog_stats* st)
+{
+	uint16_t xi, yi, n = 0;
+	struct rdp_prog_stats dummy;
+	if (!ps || !ps->tiles || keep_x1 <= keep_x0 || keep_y1 <= keep_y0)
+		return 0;
+	if (!st)
+		st = &dummy;
+	for (yi = 0; yi < ps->gh; yi++)
+		for (xi = 0; xi < ps->gw; xi++)
+		{
+			struct rdp_prog_tile* t = ps->tiles[(size_t)yi * ps->gw + xi];
+			int32_t tx = (int32_t)xi * 64, ty = (int32_t)yi * 64;
+			if (!t || !t->coef)
+				continue;
+			/* Completely outside the keep rect: drop coefs (pixels stay if painted). */
+			if (!(tx + 64 <= keep_x0 || ty + 64 <= keep_y0 || tx >= keep_x1 || ty >= keep_y1))
+				continue;
+			rdp_mem_free(mem, t->coef);
+			t->coef = NULL;
+			if (t->sign)
+			{
+				rdp_mem_free(mem, t->sign);
+				t->sign = NULL;
+			}
+			/* painted stays: surface pixels remain valid until overwritten */
+			st->trimmed++;
+			n++;
+		}
+	return (int)n;
 }
 
 void rdp_progressive_free(struct rdp_prog_surface* ps, const struct rdp_mem* mem)

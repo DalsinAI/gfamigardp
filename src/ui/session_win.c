@@ -8,6 +8,7 @@
  * MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #include "ui.h"
+#include "ogpu_yuv.h"
 #include "session.h"
 #include "amipr.h"
 #include "rdpgfx.h"
@@ -723,6 +724,7 @@ int session_window(struct app* app, struct session_info* info)
 	}
 	if (ok)
 	{
+		rdp_ogpu_yuv_install();
 		draw_desktop(&s);
 		/* the Capabilities Exchange and the finalization on the connection
 		 * the connection window opened (review B1) go on in the loop below,
@@ -921,5 +923,6 @@ int session_window(struct app* app, struct session_info* info)
 		CloseScreen(s.own);
 		s.own = NULL;
 	}
+	rdp_ogpu_yuv_remove();
 	return s.result;
 }

@@ -1,0 +1,26 @@
+OpenUp RDP optimisations (v0.1.0-rc2+)
+======================================
+
+1) OpenGPU dirty blit (src/ui/desktop.c)
+   - OGPU_Query(PIXELS|COPY) once; shared OpenGPUBase with ogpu_yuv.
+   - LockBitMapTagList → COPY when ARGB32 else PIXELS; CyberGraphX
+     WritePixelArray remains the fallback.
+   - Layer MinX/MinY offsets; Wait after Submit.
+   - Base is not closed when blit Query fails (YUV may still need it).
+
+2) Progressive squeeze (progressive.c / rdpgfx.c)
+   - idwt1: memcpy when xs==1 (common horizontal path).
+   - YCbCr→RGB: unsigned clamp (branch-light) on the 68040 hot path.
+   - Trim O1b: rdp_progressive_trim frees coef/sign for tiles completely
+     outside a keep rect (painted pixels stay). rdp_gfx_set_view keeps
+     ±1 viewport margin. Safe for pan-back: next Progressive update for
+     that tile rebuilds coefs.
+
+3) OGPU_OP_YUV pilot (src/amiga/ogpu_yuv.c)
+   - Behind OGPU_Query(YUV); rdp_progressive_set_ycbcr for the session.
+   - RFX Progressive is 4:4:4; hook 2×2-subsamples Cb/Cr to I420 and uses
+     OGPU_YUV_JPEG. Not bit-exact vs the MS-RDPRFX matrix — visual QA only;
+     CPU path stays the reference when Query fails or Submit fails.
+   - session_window installs on open, removes on close.
+
+Skipped on classic 68040 lab: Multicore, OpenMedia (no cores board; Media stage-0).

@@ -779,6 +779,8 @@ int rdp_gfx_input(struct rdp_gfx* g, const uint8_t* data, size_t len)
 
 void rdp_gfx_set_view(struct rdp_gfx* g, uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 {
+	int i;
+	uint16_t vw, vh, mx0, my0, mx1, my1;
 	if (!g)
 		return;
 	if (x1 <= x0 || y1 <= y0)
@@ -794,6 +796,32 @@ void rdp_gfx_set_view(struct rdp_gfx* g, uint16_t x0, uint16_t y0, uint16_t x1, 
 	g->view_y0 = y0;
 	g->view_x1 = x1;
 	g->view_y1 = y1;
+	/* O1b: free Progressive coefs more than one viewport away (pixels stay). */
+	vw = (uint16_t)(x1 - x0);
+	vh = (uint16_t)(y1 - y0);
+	mx0 = x0 > vw ? (uint16_t)(x0 - vw) : 0;
+	my0 = y0 > vh ? (uint16_t)(y0 - vh) : 0;
+	mx1 = (uint16_t)(x1 + vw > g->fb.w ? g->fb.w : x1 + vw);
+	my1 = (uint16_t)(y1 + vh > g->fb.h ? g->fb.h : y1 + vh);
+	for (i = 0; i < RDP_GFX_MAX_SURFACES; i++)
+	{
+		struct rdp_gfx_surface* sf = &g->surf[i];
+		int32_t kx0, ky0, kx1, ky1;
+		if (!sf->used || !sf->prog.tiles)
+			continue;
+		kx0 = (int32_t)mx0 - (int32_t)sf->ox;
+		ky0 = (int32_t)my0 - (int32_t)sf->oy;
+		kx1 = (int32_t)mx1 - (int32_t)sf->ox;
+		ky1 = (int32_t)my1 - (int32_t)sf->oy;
+		if (kx0 < 0) kx0 = 0;
+		if (ky0 < 0) ky0 = 0;
+		if (kx1 > sf->w) kx1 = sf->w;
+		if (ky1 > sf->h) ky1 = sf->h;
+		if (kx1 > kx0 && ky1 > ky0)
+			rdp_progressive_trim(&sf->prog, &g->mem,
+			                     (uint16_t)kx0, (uint16_t)ky0, (uint16_t)kx1, (uint16_t)ky1,
+			                     &g->st.prog);
+	}
 }
 
 int rdp_gfx_paint_view(struct rdp_gfx* g)

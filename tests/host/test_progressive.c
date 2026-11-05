@@ -111,6 +111,37 @@ static int test_view_paint(void)
 	return 0;
 }
 
+
+static int test_trim(void)
+{
+	struct rdp_prog_surface ps;
+	struct rdp_prog_stats st;
+	struct rdp_prog_tile* t;
+	memset(&ps, 0, sizeof(ps));
+	memset(&st, 0, sizeof(st));
+	ps.gw = 4; ps.gh = 4;
+	ps.tiles = calloc((size_t)ps.gw * ps.gh, sizeof(*ps.tiles));
+	CHECK(ps.tiles);
+	t = calloc(1, sizeof(*t));
+	CHECK(t);
+	t->coef = calloc(3 * RDP_PROG_COEFS, sizeof(int16_t));
+	CHECK(t->coef);
+	t->painted = 1;
+	ps.tiles[0] = t; /* tile (0,0) covers [0,64) */
+	/* keep far away → free coefs, keep painted */
+	CHECK(rdp_progressive_trim(&ps, NULL, 200, 200, 264, 264, &st) == 1);
+	CHECK(t->coef == NULL);
+	CHECK(t->painted == 1);
+	CHECK(st.trimmed == 1);
+	/* restore and keep near → keep coefs */
+	t->coef = calloc(3 * RDP_PROG_COEFS, sizeof(int16_t));
+	CHECK(t->coef);
+	CHECK(rdp_progressive_trim(&ps, NULL, 0, 0, 64, 64, &st) == 0);
+	CHECK(t->coef != NULL);
+	rdp_progressive_free(&ps, NULL);
+	return 0;
+}
+
 static void bench_idwt(int re, int rounds)
 {
 	static int32_t buf[4096], tmp[20000];
@@ -148,6 +179,7 @@ int main(void)
 	CHECK(test_dwt(1) <= 8);
 	CHECK(test_dwt(0) <= 8);
 	test_view_paint();
+	test_trim();
 	if (!fails) {
 		bench_idwt(1, 500);
 		bench_idwt(0, 500);

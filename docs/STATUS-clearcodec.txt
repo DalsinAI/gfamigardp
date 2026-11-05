@@ -26,3 +26,9 @@ Gaps
 - GNOME RD lab still Progressive-only so far; ClearCodec shows on Windows.
 
 Lab / stove filled after deploy.
+
+Lab deploy (this pass)
+- stove os32-gcc16 job j20261105T140532-621c1f: exit 0
+- lab_put restart: SYS:C/GFAmigaRDP
+  sha256 0d20981a2629ce43bffc4f0d93654e1a20088c5856dafb5207eff9012f365e0f
+- Previous binary archived under labs/gfamigardp-ui/archive/put-20261105T140837-475b/

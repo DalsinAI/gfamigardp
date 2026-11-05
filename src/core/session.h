@@ -15,6 +15,8 @@
 #include "pdu.h"
 #include "drdynvc.h"
 
+struct rdp_gfx;   /* rdpgfx.h */
+
 /* how far the session got */
 enum
 {
@@ -56,6 +58,13 @@ struct rdp_conn
 	uint8_t dynvc_on;            /* 1: manager initialised */
 	uint32_t gfx_msgs;           /* complete messages on Microsoft::Windows::RDS::Graphics */
 	uint32_t gfx_bytes;
+	/* RDPGFX ([MS-RDPEGFX]) on that channel: off unless gfx_enable is set before
+	 * the connection (and the client data offered RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL);
+	 * with it off the channel is accepted and only counted, as before */
+	uint8_t gfx_enable;
+	uint8_t gfx_open_pending;    /* caps advertise to send once the CREATE response went */
+	uint32_t gfx_chan;           /* its DVC channel id */
+	struct rdp_gfx* gfx;         /* surfaces, cache, output buffer (gfx->fb); NULL when off */
 	uint8_t* buf;                /* 64 KiB: what came, a PDU and the start of the next */
 	size_t have;                 /* bytes of it read and not acted on yet */
 	uint8_t* tx;                 /* 4 KiB after it, for what the client sends */

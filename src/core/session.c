@@ -4,6 +4,7 @@
  */
 #include "session.h"
 #include "amipr.h"
+#include "rdpgfx.h"
 
 #include <exec/memory.h>
 #include <proto/exec.h>
@@ -70,32 +71,87 @@ static int dynvc_send(void* user, const uint8_t* pdu, size_t len)
 	return 0;
 }
 
+/* RDPGFX memory: AllocVec(MEMF_ANY) takes Fast RAM first by priority; the
+ * buffers are only touched by the CPU, so Chip RAM is never needed */
+static void* gfx_alloc(void* user, size_t n)
+{
+	(void)user;
+	return AllocVec((ULONG)(n ? n : 1), MEMF_ANY);
+}
+
+static void gfx_free(void* user, void* p)
+{
+	(void)user;
+	FreeVec(p);
+}
+
+static int gfx_send(void* user, const uint8_t* data, size_t len)
+{
+	struct rdp_conn* c = (struct rdp_conn*)user;
+	return rdp_dynvc_send_data(&c->dynvc, c->gfx_chan, data, len);
+}
+
+static void gfx_drop(struct rdp_conn* c)
+{
+	if (c->gfx)
+	{
+		rdp_gfx_free(c->gfx);
+		FreeVec(c->gfx);
+		c->gfx = NULL;
+	}
+	c->gfx_open_pending = 0;
+	c->gfx_chan = 0;
+}
+
 static int on_gfx_create(struct rdp_dynvc* d, uint32_t id, const char* name, void* user)
 {
+	struct rdp_conn* c = (struct rdp_conn*)user;
+	struct rdp_mem mem;
+	uint16_t w, h;
 	(void)d;
-	(void)id;
 	(void)name;
-	(void)user;
-	return 0; /* accept; RDPGFX decode comes next */
+	if (!c || !c->gfx_enable)
+		return 0; /* accept and count only, as before */
+	gfx_drop(c);
+	c->gfx = (struct rdp_gfx*)AllocVec(sizeof(struct rdp_gfx), MEMF_ANY | MEMF_CLEAR);
+	if (!c->gfx)
+		return -1;
+	mem.alloc = gfx_alloc;
+	mem.free = gfx_free;
+	mem.user = NULL;
+	w = c->demand.width ? c->demand.width : (c->width ? c->width : 640);
+	h = c->demand.height ? c->demand.height : (c->height ? c->height : 480);
+	if (rdp_gfx_init(c->gfx, &mem, w, h, gfx_send, c) < 0)
+	{
+		FreeVec(c->gfx);
+		c->gfx = NULL;
+		return -1;
+	}
+	c->gfx_chan = id;
+	/* the caps advertise must follow our DYNVC_CREATE_RSP, which the manager
+	 * sends after this returns: rdp_conn_read sends it (see the route) */
+	c->gfx_open_pending = 1;
+	return 0;
 }
 
 static void on_gfx_data(struct rdp_dynvc* d, uint32_t id, const uint8_t* data, size_t len, void* user)
 {
 	struct rdp_conn* c = (struct rdp_conn*)user;
 	(void)d;
-	(void)id;
-	(void)data;
 	if (!c)
 		return;
 	c->gfx_msgs++;
 	c->gfx_bytes += (uint32_t)len;
+	if (c->gfx && id == c->gfx_chan)
+		rdp_gfx_input(c->gfx, data, len);   /* errors are counted in gfx->st */
 }
 
 static void on_gfx_close(struct rdp_dynvc* d, uint32_t id, void* user)
 {
+	struct rdp_conn* c = (struct rdp_conn*)user;
 	(void)d;
-	(void)id;
-	(void)user;
+	if (c && c->gfx && id == c->gfx_chan)
+		gfx_drop(c);
 }
 
 void rdp_conn_bind_dynvc(struct rdp_conn* c)
@@ -196,7 +252,15 @@ static int handle(struct rdp_conn* c, size_t len)
 	{
 		/* DRDYNVC static channel: feed CHANNEL_PDU_HEADER + payload to the manager */
 		if (c->dynvc_on && pdu.channel == c->dynvc_mcs)
-			return rdp_dynvc_input(&c->dynvc, pdu.data, pdu.len);
+		{
+			rc = rdp_dynvc_input(&c->dynvc, pdu.data, pdu.len);
+			if (rc >= 0 && c->gfx_open_pending && c->gfx)
+			{
+				c->gfx_open_pending = 0;
+				rc = rdp_gfx_on_open(c->gfx);   /* RDPGFX_CAPS_ADVERTISE_PDU */
+			}
+			return rc;
+		}
 		return 0;   /* message channel and other static VCs: later */
 	}
 	/* with TLS there is no security header after licensing (5.4.4) */
@@ -357,6 +421,7 @@ void rdp_conn_close(struct rdp_conn* c)
 		rdp_mcs_disconnect(&c->t);
 	rdp_transport_close(&c->t);
 	c->live = 0;
+	gfx_drop(c);
 	if (c->dynvc_on)
 	{
 		rdp_dynvc_free(&c->dynvc);

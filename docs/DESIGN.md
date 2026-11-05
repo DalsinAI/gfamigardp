@@ -109,7 +109,16 @@ The connection sequence (TCP, TLS, NLA, MCS, licensing) runs on its own CreateNe
   manager (src/core/drdynvc.c, vchan.c) on the DRDYNVC static channel
   (CS_NET + join + session routing). It negotiates capabilities, accepts
   create/close, and reassembles data; Microsoft::Windows::RDS::Graphics
-  is registered so RDPGFX ([MS-RDPEGFX]) can ride on it next. Later:
+  is registered for RDPGFX ([MS-RDPEGFX], src/core/rdpgfx.c): with
+  rdp_conn.gfx_enable set (RDPProbe: EARLY 0100) the client sends caps
+  8.0-10.7 that never offer AVC (AVC_DISABLED on every 10.x, no 10.1),
+  decompresses RDP8 bulk data (src/codec/zgfx.c), keeps surfaces, the
+  bitmap cache and the Graphics Output Buffer (src/codec/gfx_fb.c, all
+  AllocVec(MEMF_ANY), so Fast RAM), decodes Uncompressed and Planar,
+  and acknowledges each frame; ClearCodec, Progressive and Alpha are
+  counted and skipped for now. With the flag off the channel is accepted
+  and counted only. The UI takes the dirty rectangles with
+  rdp_fb_take_dirty and blits them (not wired yet). Later:
   cliprdr ([MS-RDPECLIP]), rdpsnd ([MS-RDPEA]) through AHI, maybe drive
   redirection ([MS-RDPEFS]).
 

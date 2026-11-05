@@ -32,6 +32,7 @@
 #include "nla.h"
 #include "mcs.h"
 #include "session.h"
+#include "rdpgfx.h"
 #include "knownhosts.h"
 #include "utf16.h"
 
@@ -118,6 +119,16 @@ static void print_conn(int rc, const struct rdp_conn* c)
 		       (unsigned)c->dynvc_mcs, c->dynvc.caps_ok ? "ok" : "pending", c->dynvc.version,
 		       (unsigned long)c->dynvc.creates, (unsigned long)c->dynvc.data_msgs,
 		       (unsigned long)c->gfx_msgs, (unsigned long)c->gfx_bytes);
+	if (c->gfx)
+		printf("RDPGFX: caps %s 0x%08lx flags 0x%lx, output %ux%u, %lu frames, %lu PDUs; fill %lu, s2s %lu, cache %lu/%lu, "
+		       "uncompressed %lu, planar %lu, skipped %lu (last codec 0x%x), AVC %lu, errors %lu.\n",
+		       c->gfx->caps_ok ? "ok" : "pending", (unsigned long)c->gfx->caps_version, (unsigned long)c->gfx->caps_flags,
+		       (unsigned)c->gfx->fb.w, (unsigned)c->gfx->fb.h, (unsigned long)c->gfx->st.frames,
+		       (unsigned long)c->gfx->st.pdus, (unsigned long)c->gfx->st.solid_fills, (unsigned long)c->gfx->st.s2s,
+		       (unsigned long)c->gfx->st.s2c, (unsigned long)c->gfx->st.c2s, (unsigned long)c->gfx->st.uncompressed,
+		       (unsigned long)c->gfx->st.planar, (unsigned long)c->gfx->st.skipped_codec,
+		       (unsigned)c->gfx->st.last_skipped_codec, (unsigned long)c->gfx->st.avc_seen,
+		       (unsigned long)c->gfx->st.errors);
 	if (c->fp.updates)
 	{
 		printf("Fast-path updateCodes:");
@@ -135,7 +146,7 @@ static void print_conn(int rc, const struct rdp_conn* c)
 		       "  (MS-RDPBCGR 1.3.1.3). Its own log says why. GNOME Remote Desktop does this unless the\n"
 		       "  client data has all three of the Graphics Pipeline (EARLY 0100), a 32 bpp session\n"
 		       "  (EARLY 0002, DEPTHS 0008, BPP=24) and the drdynvc channel; to check a server:\n"
-		       "  CHANNELS=drdynvc EARLY=0103 DEPTHS=000F BPP=24 (a test only: RDPGFX is not done yet).\n");
+		       "  CHANNELS=drdynvc EARLY=0103 DEPTHS=000F BPP=24 (EARLY 0100 turns on the RDPGFX scaffold: caps without AVC, Uncompressed and Planar).\n");
 	if (c->redirected)
 		printf("Server Redirection PDU: the server asked for a reconnection elsewhere (not followed yet).\n");
 	if (c->mr.disconnect_reason)
@@ -346,6 +357,8 @@ int main(void)
 again:
 	rdp_conn_init(&conn);
 	conn.keyboard_layout = s.keyboard_layout;
+	/* RDPGFX decode only when the Graphics Pipeline was offered (EARLY 0100) */
+	conn.gfx_enable = (s.early_caps & 0x0100) != 0;
 	printf("Connecting to %s, port %u...\n", s.host, (unsigned)s.port);
 	rc = rdp_transport_connect(t, s.host, s.port, s.timeout_us);
 	if (rc == 0)

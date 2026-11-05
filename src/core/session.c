@@ -6,6 +6,7 @@
 #include "amipr.h"
 #include "rdpgfx.h"
 #include "input.h"
+#include "amipr_clip.h"
 
 #include <exec/memory.h>
 #include <proto/exec.h>
@@ -175,6 +176,108 @@ void rdp_conn_bind_dynvc(struct rdp_conn* c)
 	}
 }
 
+/* Wrap a CLIPRDR PDU in CHANNEL_PDU_HEADER and send on the cliprdr MCS channel. */
+static int cliprdr_send(void* user, const uint8_t* pdu, size_t len)
+{
+	struct rdp_conn* c = (struct rdp_conn*)user;
+	uint8_t chunk[8 + 1600];
+	size_t sent = 0;
+	int rc;
+
+	if (!c || !c->clip_on || !c->clip_mcs || !c->tx)
+		return -1;
+	while (sent < len || (len == 0 && sent == 0))
+	{
+		size_t chunk_len = len - sent;
+		uint32_t flags = 0;
+		int n;
+		if (chunk_len > 1600)
+			chunk_len = 1600;
+		if (sent == 0)
+			flags |= RDP_VC_FLAG_FIRST;
+		if (sent + chunk_len >= len)
+			flags |= RDP_VC_FLAG_LAST;
+		n = rdp_vc_build(chunk, sizeof(chunk), pdu + sent, chunk_len, flags);
+		if (n < 0)
+			return n;
+		chunk[0] = (uint8_t)len;
+		chunk[1] = (uint8_t)(len >> 8);
+		chunk[2] = (uint8_t)(len >> 16);
+		chunk[3] = (uint8_t)(len >> 24);
+		rc = rdp_mcs_send_data(&c->t, c->tx, TX_BUF, c->mr.user_channel, c->clip_mcs,
+		                       chunk, (size_t)n);
+		if (rc < 0)
+			return rc;
+		sent += chunk_len;
+		if (len == 0)
+			break;
+	}
+	return 0;
+}
+
+/* Remote text → Amiga clipboard.device as FTXT/CHRS. */
+static void on_clip_text(void* user, const char* utf8)
+{
+	struct rdp_conn* c = (struct rdp_conn*)user;
+	if (!c || !utf8)
+		return;
+	if (amipr_clip_set_text(utf8) == AMIPR_OK)
+		c->clip_amiga_id = amipr_clip_read_id();
+}
+
+void rdp_conn_bind_cliprdr(struct rdp_conn* c)
+{
+	int i;
+	if (!c || c->clip_on)
+		return;
+	for (i = 0; i < c->mr.channel_count; i++)
+	{
+		if (c->mr.channels[i] && !strcmp(c->mr.channel_names[i], "cliprdr"))
+		{
+			c->clip_mcs = c->mr.channels[i];
+			c->clip_amiga_id = -1;
+			(void)amipr_clip_init();
+			rdp_cliprdr_init(&c->clip, cliprdr_send, on_clip_text, c);
+			c->clip_on = 1;
+			return;
+		}
+	}
+}
+
+int rdp_conn_clip_poll_local(struct rdp_conn* c)
+{
+	int32_t id;
+	char* buf;
+	int rc;
+
+	if (!c || !c->clip_on || !c->live)
+		return 0;
+	id = amipr_clip_read_id();
+	if (id == 0 || id == c->clip_amiga_id)
+		return 0;
+	buf = (char*)AllocVec(RDP_CLIP_MAX_TEXT + 1, MEMF_ANY);
+	if (!buf)
+		return AMIPR_ENOMEM;
+	rc = amipr_clip_get_text(buf, RDP_CLIP_MAX_TEXT + 1);
+	if (rc == AMIPR_OK && buf[0])
+	{
+		c->clip_amiga_id = id;
+		rc = rdp_cliprdr_set_local_text(&c->clip, buf);
+	}
+	else if (rc == AMIPR_OK)
+	{
+		c->clip_amiga_id = id;
+		rc = 0;
+	}
+	else if (rc == AMIPR_ENOTSUP)
+	{
+		c->clip_amiga_id = id;
+		rc = 0;
+	}
+	FreeVec(buf);
+	return rc < 0 ? rc : 0;
+}
+
 /* one data PDU on the I/O channel; the payload is small (sync, control, font list) */
 static int send_data(struct rdp_conn* c, uint8_t type2, const uint8_t* payload, size_t len)
 {
@@ -263,6 +366,8 @@ static int handle(struct rdp_conn* c, size_t len)
 			}
 			return rc;
 		}
+		if (c->clip_on && pdu.channel == c->clip_mcs)
+			return rdp_cliprdr_input(&c->clip, pdu.data, pdu.len);
 		return 0;   /* message channel and other static VCs: later */
 	}
 	/* with TLS there is no security header after licensing (5.4.4) */
@@ -382,6 +487,7 @@ int rdp_conn_activate(struct rdp_conn* c, int max_pdus)
 	if (!c->live)
 		return AMIPR_ECLOSED;
 	rdp_conn_bind_dynvc(c);
+	rdp_conn_bind_cliprdr(c);
 	while (n < max_pdus && c->act != RDP_ACT_ACTIVE)
 	{
 		struct amipr_wait_item it;
@@ -413,6 +519,8 @@ int rdp_conn_poll(struct rdp_conn* c, int max)
 		return rc;
 	(void)rdp_conn_input_flush(c);   /* drain queued fast-path input first */
 	rdp_conn_bind_dynvc(c);
+	rdp_conn_bind_cliprdr(c);
+	(void)rdp_conn_clip_poll_local(c);
 	while (c->live && max-- > 0)
 	{
 		rc = next_pdu(c);
@@ -434,6 +542,13 @@ void rdp_conn_close(struct rdp_conn* c)
 		rdp_dynvc_free(&c->dynvc);
 		c->dynvc_on = 0;
 		c->dynvc_mcs = 0;
+	}
+	if (c->clip_on)
+	{
+		rdp_cliprdr_free(&c->clip);
+		c->clip_on = 0;
+		c->clip_mcs = 0;
+		amipr_clip_shutdown();
 	}
 	if (c->buf)
 	{

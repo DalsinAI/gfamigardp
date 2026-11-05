@@ -1,0 +1,42 @@
+STATUS — clipboard / CLIPRDR text both ways (Sacredtrees / Team 6)
+Europe/London date in commit time.
+
+Goal
+  MS-RDPECLIP on static "cliprdr": text both ways on AmigaOS 3.2 via
+  clipboard.device (IFF FTXT/CHRS). Never put password fields on any
+  clipboard. Clean-room (CLEAN-ROOM.md); no FreeRDP/WinPR.
+
+Formats
+  Advertise / accept: CF_UNICODETEXT (13), CF_TEXT (1).
+  Refuse: file streams, metafiles, palettes, HDROP, etc. (CB_RESPONSE_FAIL).
+  Caps: CB_CAPS_VERSION_2 + CB_USE_LONG_FORMAT_NAMES when peer agrees.
+  PDU path: Caps ↔ Monitor Ready → Format List / Response → Format Data
+  Request / Response. CHANNEL_PDU_HEADER via vchan (chunk 1600).
+  Amiga: clipboard.device PRIMARY_CLIP, FORM FTXT + CHRS (Latin-1 CHRS;
+  UTF-8 through rdp_amiga_to_utf8 / best-effort Latin-1 write).
+
+SHAs (filled after push)
+  (see tip after commit)
+
+Host tests
+  tests/host/test_cliprdr.c — build helpers, init handshake, remote→local
+  UTF-16LE, local→remote serve, CF_TEXT Latin-1, non-text FAIL.
+  cc -I../../src/core -o test_cliprdr test_cliprdr.c \
+     ../../src/core/vchan.c ../../src/core/utf16.c ../../src/core/cliprdr.c
+
+Password rule
+  connect_win on_clip: COPY/CUT from the password widget are ignored;
+  OLUI already withholds password text from event value. Session cliprdr
+  never receives the connect password. take_password / wipe unchanged.
+
+Gaps (not this commit)
+  File clipboard (File Contents / File List), palette, metafile.
+  Delayed rendering / lock / unlock PDUs.
+  Large pastes above RDP_CLIP_MAX_TEXT (256 KiB) truncated.
+  Lab GUI end-to-end paste both ways vs a real Windows host (binary
+  deploy + channel offered; live host paste not automated here).
+  Sound ([MS-RDPEA]) deferred — clipboard did not finish early enough
+  for sound in the same turn.
+
+Lab / stove
+  (filled after stove + lab:gfamigardp-ui deploy)

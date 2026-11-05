@@ -70,7 +70,7 @@ struct cw
 	int pending; /* Connect asked for: done by the main loop */
 };
 
-/* Edit: the program's own clipboard for now (clipboard.device next) */
+/* Edit: local buffer for the connection window (password never stored). Session uses clipboard.device via cliprdr. */
 static char s_clip[512];
 
 /* The connection task outlives the connection window: after READY the session
@@ -369,7 +369,7 @@ static void do_cookie_reconnect(struct cw* c)
 	params.early_caps = info->early_caps ? info->early_caps : 0x0103;
 	params.color_depths = info->color_depths ? info->color_depths : 0x000F;
 	params.gfx = info->gfx;
-	strncpy(params.channels, "drdynvc", sizeof(params.channels) - 1);
+	strncpy(params.channels, "drdynvc,cliprdr", sizeof(params.channels) - 1);
 	params.arc_have = 1;
 	params.arc_logon_id = info->arc.logon_id;
 	memcpy(params.arc_random, info->arc.random, sizeof(params.arc_random));
@@ -451,7 +451,7 @@ static void do_connect(struct cw* c)
 	 * Picks below 24 still negotiate 32 bpp so GNOME's GFX path starts
 	 * (docs/LAB.txt); GFX surfaces are always 32-bit; the Amiga screen's
 	 * own depth decides how they are shown (true colour or dithered pens). */
-	strncpy(params.channels, "drdynvc", sizeof(params.channels) - 1);
+	strncpy(params.channels, "drdynvc,cliprdr", sizeof(params.channels) - 1);
 	params.gfx = 1;
 	if (params.gfx && params.depth < 24)
 		params.depth = 32;
@@ -527,9 +527,16 @@ static void on_fav(olui* ui, const olui_event* ev, void* data)
 
 static void on_clip(olui* ui, const olui_event* ev, void* data)
 {
-	(void)data;
+	struct cw* c = (struct cw*)data;
+	/* Never put the password field on any clipboard (local buffer or device).
+	 * OLUI already withholds password text from value; refuse the widget too. */
+	if (c && ev->el == c->password && (ev->type == OLUI_COPY || ev->type == OLUI_CUT))
+		return;
 	if (ev->type == OLUI_COPY || ev->type == OLUI_CUT)
-		copy_text(s_clip, sizeof(s_clip), ev->value);
+	{
+		if (ev->value)
+			copy_text(s_clip, sizeof(s_clip), ev->value);
+	}
 	else if (ev->type == OLUI_PASTE && s_clip[0])
 		olui_insert_text(ui, ev->el, s_clip);
 }

@@ -14,6 +14,7 @@
 #include "mcs.h"
 #include "pdu.h"
 #include "drdynvc.h"
+#include "cliprdr.h"
 #include "arc.h"
 
 struct rdp_gfx;   /* rdpgfx.h */
@@ -57,6 +58,11 @@ struct rdp_conn
 	struct rdp_dynvc dynvc;
 	uint16_t dynvc_mcs;          /* MCS channel id, 0 if none */
 	uint8_t dynvc_on;            /* 1: manager initialised */
+	/* CLIPRDR ([MS-RDPECLIP]) on the static "cliprdr" channel when offered */
+	struct rdp_cliprdr clip;
+	uint16_t clip_mcs;           /* MCS channel id, 0 if none */
+	uint8_t clip_on;             /* 1: cliprdr initialised */
+	int32_t clip_amiga_id;       /* last CBD_CURRENTREADID seen (-1 none) */
 	uint32_t gfx_msgs;           /* complete messages on Microsoft::Windows::RDS::Graphics */
 	uint32_t gfx_bytes;
 	/* RDPGFX ([MS-RDPEGFX]) on that channel: off unless gfx_enable is set before
@@ -91,6 +97,11 @@ struct rdp_conn
 void rdp_conn_init(struct rdp_conn* c);
 /* After MCS has joined channels: bind DRDYNVC when "drdynvc" was offered. Idempotent. */
 void rdp_conn_bind_dynvc(struct rdp_conn* c);
+/* After MCS has joined channels: bind CLIPRDR when "cliprdr" was offered. Idempotent. */
+void rdp_conn_bind_cliprdr(struct rdp_conn* c);
+/* Poll Amiga clipboard.device: if the clip id changed, announce FTXT to the peer.
+ * Call from the session poll loop. Never feeds a password. 0 or < 0. */
+int rdp_conn_clip_poll_local(struct rdp_conn* c);
 /* Reads until Demand Active, answers it and the finalization PDUs, and
  * reads until the Font Map, at most each transport timeout per PDU and
  * max_pdus PDUs in all. 0 when the session is active; RDP_E_PROTO, a

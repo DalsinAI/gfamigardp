@@ -113,6 +113,11 @@ static void print_conn(int rc, const struct rdp_conn* c)
 	printf("Session: %s; %lu PDUs, %lu slow-path updates, fast-path %lu PDUs / %lu updates / %lu bytes.\n",
 	       rdp_act_name(c->act), (unsigned long)c->pdus, (unsigned long)c->slow_updates,
 	       (unsigned long)c->fp.pdus, (unsigned long)c->fp.updates, (unsigned long)c->fp.bytes);
+	if (c->dynvc_on)
+		printf("DRDYNVC: MCS channel %u, caps %s (v%d), %lu creates, %lu DVC messages; GFX %lu msgs / %lu bytes.\n",
+		       (unsigned)c->dynvc_mcs, c->dynvc.caps_ok ? "ok" : "pending", c->dynvc.version,
+		       (unsigned long)c->dynvc.creates, (unsigned long)c->dynvc.data_msgs,
+		       (unsigned long)c->gfx_msgs, (unsigned long)c->gfx_bytes);
 	if (c->fp.updates)
 	{
 		printf("Fast-path updateCodes:");

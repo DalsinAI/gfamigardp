@@ -13,6 +13,7 @@
 #include "connect.h"
 #include "mcs.h"
 #include "pdu.h"
+#include "drdynvc.h"
 
 /* how far the session got */
 enum
@@ -49,6 +50,12 @@ struct rdp_conn
 	                                the session ends with RDP_E_REDIRECT; it is not followed, nor
 	                                advertised (TS_UD_CS_CLUSTER) */
 	struct rdp_fp_counts fp;
+	/* DRDYNVC ([MS-RDPEDYC]) on the static "drdynvc" channel when offered */
+	struct rdp_dynvc dynvc;
+	uint16_t dynvc_mcs;          /* MCS channel id, 0 if none */
+	uint8_t dynvc_on;            /* 1: manager initialised */
+	uint32_t gfx_msgs;           /* complete messages on Microsoft::Windows::RDS::Graphics */
+	uint32_t gfx_bytes;
 	uint8_t* buf;                /* 64 KiB: what came, a PDU and the start of the next */
 	size_t have;                 /* bytes of it read and not acted on yet */
 	uint8_t* tx;                 /* 4 KiB after it, for what the client sends */
@@ -64,6 +71,8 @@ struct rdp_conn
 };
 
 void rdp_conn_init(struct rdp_conn* c);
+/* After MCS has joined channels: bind DRDYNVC when "drdynvc" was offered. Idempotent. */
+void rdp_conn_bind_dynvc(struct rdp_conn* c);
 /* Reads until Demand Active, answers it and the finalization PDUs, and
  * reads until the Font Map, at most each transport timeout per PDU and
  * max_pdus PDUs in all. 0 when the session is active; RDP_E_PROTO, a

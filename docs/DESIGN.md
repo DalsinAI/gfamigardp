@@ -104,9 +104,12 @@ src/amiga and src/ui include Amiga headers.
   4. later: drawing orders and their caches ([MS-RDPEGDI]): DstBlt,
      PatBlt, ScrBlt, OpaqueRect, MemBlt with the bitmap cache, glyphs.
 - **Channels**: drdynvc ([MS-RDPEDYC]) is the Dynamic Virtual Channel
-  manager (src/core/drdynvc.c) on the DRDYNVC static channel; RDPGFX
-  ([MS-RDPEGFX]) rides on it. Later: cliprdr ([MS-RDPECLIP]), rdpsnd
-  ([MS-RDPEA]) through AHI, maybe drive redirection ([MS-RDPEFS]).
+  manager (src/core/drdynvc.c, vchan.c) on the DRDYNVC static channel
+  (CS_NET + join + session routing). It negotiates capabilities, accepts
+  create/close, and reassembles data; Microsoft::Windows::RDS::Graphics
+  is registered so RDPGFX ([MS-RDPEGFX]) can ride on it next. Later:
+  cliprdr ([MS-RDPECLIP]), rdpsnd ([MS-RDPEA]) through AHI, maybe drive
+  redirection ([MS-RDPEFS]).
 
 ## Drawing
 

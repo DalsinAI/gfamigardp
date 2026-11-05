@@ -184,6 +184,31 @@ static void utf16_fixed(struct rdp_stream* s, const char* str, size_t bytes)
 		rdp_s_u16le(s, 0);
 }
 
+
+/* CS_NET names in offer order (same order SC_NET returns channel ids). */
+static void remember_channel_names(struct rdp_mcs_result* r, const char* list)
+{
+	const char* p = list;
+	int n = 0;
+	memset(r->channel_names, 0, sizeof(r->channel_names));
+	if (!p || !*p)
+		return;
+	for (;;)
+	{
+		const char* e = strchr(p, ',');
+		size_t l = e ? (size_t)(e - p) : strlen(p);
+		if (l > 0 && l < 8 && n < RDP_MCS_MAX_CHANNELS)
+		{
+			memcpy(r->channel_names[n], p, l);
+			r->channel_names[n][l] = 0;
+			n++;
+		}
+		if (!e)
+			return;
+		p = e + 1;
+	}
+}
+
 /* TS_UD_CS_NET (2.2.1.3.4): the static virtual channels, from a comma-separated
  * list of names (at most 7 characters each, 2.2.1.3.4.1); none: no block */
 static int cs_net_count(const char* list)
@@ -787,6 +812,7 @@ int rdp_mcs_connect(struct rdp_transport* t, const struct rdp_settings* s, uint3
 	int rc, i;
 
 	memset(r, 0, sizeof(*r));
+	remember_channel_names(r, s->channels);
 	buf = AllocVec(BUF, MEMF_ANY | MEMF_CLEAR);
 	if (!buf)
 		return AMIPR_ENOMEM;

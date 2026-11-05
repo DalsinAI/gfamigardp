@@ -45,6 +45,7 @@ struct rdp_mcs_result
 	uint16_t io_channel, msg_channel, user_channel;
 	uint16_t channel_count;
 	uint16_t channels[RDP_MCS_MAX_CHANNELS];
+	char channel_names[RDP_MCS_MAX_CHANNELS][8]; /* ANSI names offered in CS_NET, join order */
 	unsigned attach_result, join_result;
 	uint16_t join_failed;        /* the channel a join was refused for */
 	unsigned disconnect_reason;  /* Disconnect Provider Ultimatum, +1 so 0 is none */

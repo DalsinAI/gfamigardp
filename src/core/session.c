@@ -29,6 +29,94 @@ static int need_buf(struct rdp_conn* c)
 	return c->buf ? 0 : AMIPR_ENOMEM;
 }
 
+/* Wrap a DYNVC PDU in CHANNEL_PDU_HEADER and send on the drdynvc MCS channel. */
+static int dynvc_send(void* user, const uint8_t* pdu, size_t len)
+{
+	struct rdp_conn* c = (struct rdp_conn*)user;
+	uint8_t chunk[8 + 1600];
+	size_t sent = 0;
+	int rc;
+
+	if (!c || !c->dynvc_on || !c->dynvc_mcs || !c->tx)
+		return -1;
+	/* CHANNEL_CHUNK_LENGTH is 1600 ([MS-RDPBCGR] 2.2.6): fragment if needed */
+	while (sent < len || (len == 0 && sent == 0))
+	{
+		size_t chunk_len = len - sent;
+		uint32_t flags = 0;
+		int n;
+		if (chunk_len > 1600)
+			chunk_len = 1600;
+		if (sent == 0)
+			flags |= RDP_VC_FLAG_FIRST;
+		if (sent + chunk_len >= len)
+			flags |= RDP_VC_FLAG_LAST;
+		n = rdp_vc_build(chunk, sizeof(chunk), pdu + sent, chunk_len, flags);
+		if (n < 0)
+			return n;
+		/* CHANNEL_PDU_HEADER::length is the whole reassembled length ([MS-RDPBCGR] 2.2.6.1) */
+		chunk[0] = (uint8_t)len;
+		chunk[1] = (uint8_t)(len >> 8);
+		chunk[2] = (uint8_t)(len >> 16);
+		chunk[3] = (uint8_t)(len >> 24);
+		rc = rdp_mcs_send_data(&c->t, c->tx, TX_BUF, c->mr.user_channel, c->dynvc_mcs,
+		                       chunk, (size_t)n);
+		if (rc < 0)
+			return rc;
+		sent += chunk_len;
+		if (len == 0)
+			break;
+	}
+	return 0;
+}
+
+static int on_gfx_create(struct rdp_dynvc* d, uint32_t id, const char* name, void* user)
+{
+	(void)d;
+	(void)id;
+	(void)name;
+	(void)user;
+	return 0; /* accept; RDPGFX decode comes next */
+}
+
+static void on_gfx_data(struct rdp_dynvc* d, uint32_t id, const uint8_t* data, size_t len, void* user)
+{
+	struct rdp_conn* c = (struct rdp_conn*)user;
+	(void)d;
+	(void)id;
+	(void)data;
+	if (!c)
+		return;
+	c->gfx_msgs++;
+	c->gfx_bytes += (uint32_t)len;
+}
+
+static void on_gfx_close(struct rdp_dynvc* d, uint32_t id, void* user)
+{
+	(void)d;
+	(void)id;
+	(void)user;
+}
+
+void rdp_conn_bind_dynvc(struct rdp_conn* c)
+{
+	int i;
+	if (!c || c->dynvc_on)
+		return;
+	for (i = 0; i < c->mr.channel_count; i++)
+	{
+		if (c->mr.channels[i] && !strcmp(c->mr.channel_names[i], "drdynvc"))
+		{
+			c->dynvc_mcs = c->mr.channels[i];
+			rdp_dynvc_init(&c->dynvc, dynvc_send, c);
+			rdp_dynvc_listen(&c->dynvc, "Microsoft::Windows::RDS::Graphics",
+			                 on_gfx_create, on_gfx_data, on_gfx_close, c);
+			c->dynvc_on = 1;
+			return;
+		}
+	}
+}
+
 /* one data PDU on the I/O channel; the payload is small (sync, control, font list) */
 static int send_data(struct rdp_conn* c, uint8_t type2, const uint8_t* payload, size_t len)
 {
@@ -102,8 +190,15 @@ static int handle(struct rdp_conn* c, size_t len)
 	c->pdus++;
 	if (pdu.fastpath)
 		return rdp_fastpath_count(pdu.data, pdu.len, &c->fp) < 0 ? RDP_E_PROTO : 0;
-	if (!pdu.len || pdu.channel != c->mr.io_channel)
-		return 0;   /* the message channel's (auto-detect, multitransport) and the virtual channels' are not read yet */
+	if (!pdu.len)
+		return 0;
+	if (pdu.channel != c->mr.io_channel)
+	{
+		/* DRDYNVC static channel: feed CHANNEL_PDU_HEADER + payload to the manager */
+		if (c->dynvc_on && pdu.channel == c->dynvc_mcs)
+			return rdp_dynvc_input(&c->dynvc, pdu.data, pdu.len);
+		return 0;   /* message channel and other static VCs: later */
+	}
 	/* with TLS there is no security header after licensing (5.4.4) */
 	if (rdp_share_parse(pdu.data, pdu.len, &sh) < 0)
 		return RDP_E_PROTO;
@@ -216,6 +311,7 @@ int rdp_conn_activate(struct rdp_conn* c, int max_pdus)
 		return rc;
 	if (!c->live)
 		return AMIPR_ECLOSED;
+	rdp_conn_bind_dynvc(c);
 	while (n < max_pdus && c->act != RDP_ACT_ACTIVE)
 	{
 		struct amipr_wait_item it;
@@ -245,6 +341,7 @@ int rdp_conn_poll(struct rdp_conn* c, int max)
 	int rc = need_buf(c);
 	if (rc < 0)
 		return rc;
+	rdp_conn_bind_dynvc(c);
 	while (c->live && max-- > 0)
 	{
 		rc = next_pdu(c);
@@ -260,6 +357,12 @@ void rdp_conn_close(struct rdp_conn* c)
 		rdp_mcs_disconnect(&c->t);
 	rdp_transport_close(&c->t);
 	c->live = 0;
+	if (c->dynvc_on)
+	{
+		rdp_dynvc_free(&c->dynvc);
+		c->dynvc_on = 0;
+		c->dynvc_mcs = 0;
+	}
 	if (c->buf)
 	{
 		FreeVec(c->buf);

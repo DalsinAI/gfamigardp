@@ -26,7 +26,7 @@
 #include "gfopenlayout_ui_amiga.h"
 
 
-enum { M_DISC = 1, M_CAD, M_QUIT, M_FULL, M_ABOUT };
+enum { M_DISC = 1, M_CAD, M_QUIT, M_FULL, M_ABOUT, M_HOME, M_PAN_L, M_PAN_R, M_PAN_U, M_PAN_D };
 
 static const struct NewMenu menus[] = {
 	{ NM_TITLE, (STRPTR) "Project", NULL, 0, 0, NULL },
@@ -36,6 +36,12 @@ static const struct NewMenu menus[] = {
 	{ NM_ITEM, (STRPTR) "Quit", (STRPTR) "Q", 0, 0, (APTR)M_QUIT },
 	{ NM_TITLE, (STRPTR) "View", NULL, 0, 0, NULL },
 	{ NM_ITEM, (STRPTR) "Full screen", (STRPTR) "F", 0, 0, (APTR)M_FULL },
+	{ NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL },
+	{ NM_ITEM, (STRPTR) "Home (top-left)", (STRPTR) "H", 0, 0, (APTR)M_HOME },
+	{ NM_ITEM, (STRPTR) "Pan left", NULL, 0, 0, (APTR)M_PAN_L },
+	{ NM_ITEM, (STRPTR) "Pan right", NULL, 0, 0, (APTR)M_PAN_R },
+	{ NM_ITEM, (STRPTR) "Pan up", NULL, 0, 0, (APTR)M_PAN_U },
+	{ NM_ITEM, (STRPTR) "Pan down", NULL, 0, 0, (APTR)M_PAN_D },
 	{ NM_TITLE, (STRPTR) "Help", NULL, 0, 0, NULL },
 	{ NM_ITEM, (STRPTR) "About...", NULL, 0, 0, (APTR)M_ABOUT },
 	{ NM_END, NULL, NULL, 0, 0, NULL },
@@ -55,10 +61,19 @@ struct sw
 	uint32_t shown_frames;
 	uint64_t last_blit;      /* amipr_monotonic_us of the last blit: at most one a frame */
 	uint8_t fb_shown;        /* 1: the desktop band shows the Graphics Output Buffer, not the pattern */
+	int view_ox, view_oy;    /* pan: top-left of the band in remote/fb coordinates */
+	int panning;             /* 1 while left-dragging the desktop to pan */
+	int pan_mx, pan_my;      /* last mouse position during a pan drag */
 };
 
 /* 1/30 s: dirty rectangles that come faster wait for the next one */
 #define BLIT_US 33000
+
+static void band(struct sw* s, int* x, int* y, int* iw, int* ih);
+static void draw_desktop(struct sw* s);
+static void show_mode(struct sw* s);
+static void pan_home(struct sw* s);
+static void pan_by(struct sw* s, int dx, int dy);
 
 static const char* codec_name(uint16_t id)
 {
@@ -102,8 +117,18 @@ static void show_mode(struct sw* s)
 		if (s->conn->demand.bpp)
 			d = s->conn->demand.bpp;
 	}
-	/* plain ASCII in the strips (review M9) */
-	snprintf(line, sizeof(line), "%u x %u, %u-bit - %s", w, h, d, info->security);
+	/* plain ASCII in the strips (review M9); pan offset when not at the origin */
+	{
+		int x, y, iw, ih;
+		band(s, &x, &y, &iw, &ih);
+		(void)x; (void)y;
+		if (s->view_ox || s->view_oy || (int)w > iw || (int)h > ih)
+			snprintf(line, sizeof(line), "%d x %d of %u x %u +%d,+%d, %u-bit - %s",
+			         iw < (int)w ? iw : (int)w, ih < (int)h ? ih : (int)h,
+			         w, h, s->view_ox, s->view_oy, d, info->security);
+		else
+			snprintf(line, sizeof(line), "%u x %u, %u-bit - %s", w, h, d, info->security);
+	}
 	olui_set_text(s->sb, olui_find(s->sb, "mode"), line);
 }
 
@@ -176,6 +201,20 @@ static void action(struct sw* s, int what)
 			break;
 		case M_FULL: status(s, "Full screen comes with the session's own screen (roadmap phase 4)."); break;
 		case M_ABOUT: ui_about(s->win); break;
+		case M_HOME: pan_home(s); break;
+		case M_PAN_L: case M_PAN_R: case M_PAN_U: case M_PAN_D:
+		{
+			int x, y, iw, ih, step;
+			band(s, &x, &y, &iw, &ih);
+			(void)x; (void)y;
+			step = iw > 64 ? iw / 2 : 32;
+			if (what == M_PAN_U || what == M_PAN_D)
+				step = ih > 64 ? ih / 2 : 32;
+			pan_by(s,
+			       what == M_PAN_L ? -step : what == M_PAN_R ? step : 0,
+			       what == M_PAN_U ? -step : what == M_PAN_D ? step : 0);
+			break;
+		}
 	}
 }
 
@@ -186,7 +225,8 @@ static void on_tb(olui* ui, const olui_event* ev, void* data)
 	if (!strcmp(ev->id, "disc")) action(s, M_DISC);
 	else if (!strcmp(ev->id, "cad")) action(s, M_CAD);
 	else if (!strcmp(ev->id, "full")) action(s, M_FULL);
-	else if (!strcmp(ev->id, "keys")) status(s, "Keys: every key but the Amiga keys goes to the computer.");
+	else if (!strcmp(ev->id, "keys")) status(s, "Keys: Amiga-key menus stay local. Drag the desktop to pan; Amiga-H homes.");
+	else if (!strcmp(ev->id, "home")) pan_home(s);
 }
 
 static void band(struct sw* s, int* x, int* y, int* iw, int* ih)
@@ -198,17 +238,51 @@ static void band(struct sw* s, int* x, int* y, int* iw, int* ih)
 	*ih = w->Height - w->BorderTop - w->BorderBottom - s->tb_h - s->sb_h;
 }
 
+static void clamp_pan(struct sw* s)
+{
+	int x, y, iw, ih, fw, fh;
+	struct rdp_fb* fb = session_fb(s);
+	band(s, &x, &y, &iw, &ih);
+	(void)x; (void)y;
+	fw = fb ? fb->w : (int)s->info->width;
+	fh = fb ? fb->h : (int)s->info->height;
+	if (fw <= iw) s->view_ox = 0;
+	else if (s->view_ox > fw - iw) s->view_ox = fw - iw;
+	if (fh <= ih) s->view_oy = 0;
+	else if (s->view_oy > fh - ih) s->view_oy = fh - ih;
+	if (s->view_ox < 0) s->view_ox = 0;
+	if (s->view_oy < 0) s->view_oy = 0;
+}
+
+static void pan_by(struct sw* s, int dx, int dy)
+{
+	s->view_ox += dx;
+	s->view_oy += dy;
+	clamp_pan(s);
+	draw_desktop(s);
+	show_mode(s);
+}
+
+static void pan_home(struct sw* s)
+{
+	s->view_ox = s->view_oy = 0;
+	draw_desktop(s);
+	show_mode(s);
+}
+
 /* all of the band: the remote desktop once it has drawn, the test pattern before */
 static void draw_desktop(struct sw* s)
 {
 	int x, y, iw, ih;
 	struct rdp_fb* fb = session_fb(s);
 	band(s, &x, &y, &iw, &ih);
+	clamp_pan(s);
+	band(s, &x, &y, &iw, &ih);
 	if (fb)
 	{
 		struct rdp_dirty d;
 		rdp_fb_take_dirty(fb, &d, NULL);   /* all of it is drawn now */
-		desktop_draw_fb(s->win, x, y, iw, ih, fb);
+		desktop_draw_fb(s->win, x, y, iw, ih, fb, s->view_ox, s->view_oy);
 		s->fb_shown = 1;
 		s->last_blit = amipr_monotonic_us();
 	}
@@ -236,8 +310,9 @@ static int blit_dirty(struct sw* s, int force)
 		return 1;
 	if (rdp_fb_take_dirty(fb, &d, NULL) <= 0)
 		return 0;
+	clamp_pan(s);
 	band(s, &x, &y, &iw, &ih);
-	desktop_blit(s->win, x, y, iw, ih, fb, d.r, d.n);
+	desktop_blit(s->win, x, y, iw, ih, fb, d.r, d.n, s->view_ox, s->view_oy);
 	s->last_blit = now;
 	return 0;
 }
@@ -300,7 +375,7 @@ int session_window(struct app* app, const struct session_info* info)
 		WA_DragBar, TRUE, WA_DepthGadget, TRUE, WA_CloseGadget, TRUE, WA_SizeGadget, TRUE,
 		WA_SizeBBottom, TRUE,
 		WA_Activate, TRUE, WA_SimpleRefresh, TRUE, WA_ReportMouse, TRUE, WA_NewLookMenus, TRUE,
-		WA_IDCMP, olui_amiga_idcmp() | IDCMP_MENUPICK, TAG_DONE);
+		WA_IDCMP, olui_amiga_idcmp() | IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS | IDCMP_MOUSEMOVE, TAG_DONE);
 	if (!s.win)
 		return 1;
 	menu = ui_menus(app, menus);
@@ -314,8 +389,8 @@ int session_window(struct app* app, const struct session_info* info)
 		snprintf(line, sizeof(line), "%s%s%s", info->user, info->user[0] ? " on " : "", info->host);
 		olui_set_text(s.tb, olui_find(s.tb, "where"), line);
 		show_mode(&s);
-		status(&s, info->demo ? "Demo session: no server. Amiga-D disconnects." :
-		                        "Connected and secured. The desktop appears with the first frame.");
+		status(&s, info->demo ? "Demo session: no server. Drag to pan; Amiga-H homes. Amiga-D disconnects." :
+		                        "Connected and secured. Drag the desktop to pan; Amiga-H homes.");
 		/* both strips need library 11; the static libolui always has them */
 		/* the strips first: olui_amiga_layout draws all it has, the whole window
 		 * when it has no strip yet (and the status bar's row went to the top) */
@@ -383,6 +458,7 @@ int session_window(struct app* app, const struct session_info* info)
 			{
 				ULONG cls = m->Class;
 				UWORD code = m->Code;
+				WORD mx = m->MouseX, my = m->MouseY;
 				int r1, r2;
 				if (cls == IDCMP_MENUPICK)
 				{
@@ -413,7 +489,35 @@ int session_window(struct app* app, const struct session_info* info)
 					 * desktop band between them is now somewhere else */
 					olui_amiga_draw(s.atb);
 					olui_amiga_draw(s.asb);
+					clamp_pan(&s);
 					draw_desktop(&s);
+					show_mode(&s);
+				}
+				else if (cls == IDCMP_MOUSEBUTTONS)
+				{
+					int bx, by, iw, ih;
+					band(&s, &bx, &by, &iw, &ih);
+					if (code == SELECTDOWN &&
+					    (int)mx >= bx && (int)mx < bx + iw &&
+					    (int)my >= by && (int)my < by + ih)
+					{
+						/* Left-drag pans until remote input is wired (then
+						 * middle-button / a modifier will take over). */
+						s.panning = 1;
+						s.pan_mx = (int)mx;
+						s.pan_my = (int)my;
+					}
+					else if (code == SELECTUP || code == MENUUP)
+						s.panning = 0;
+				}
+				else if (cls == IDCMP_MOUSEMOVE && s.panning)
+				{
+					int dx = s.pan_mx - (int)mx;
+					int dy = s.pan_my - (int)my;
+					s.pan_mx = (int)mx;
+					s.pan_my = (int)my;
+					if (dx || dy)
+						pan_by(&s, dx, dy);
 				}
 			}
 			olui_amiga_draw(s.atb);

@@ -190,35 +190,47 @@ static int truecolour_rp(struct RastPort* rp)
  * row by row through the dither cube and WriteChunkyPixels.
  */
 void desktop_blit(struct Window* win, int x0, int y0, int w, int h, const struct rdp_fb* fb,
-                  const struct rdp_rect* rects, int n)
+                  const struct rdp_rect* rects, int n, int ox, int oy)
 {
 	struct RastPort* rp = win->RPort;
 	int i, truecolour;
 	UBYTE* row = NULL;
+	int vx1, vy1;
 
 	if (w <= 0 || h <= 0 || !fb || !fb->px)
 		return;
+	if (ox < 0) ox = 0;
+	if (oy < 0) oy = 0;
+	vx1 = ox + w;
+	vy1 = oy + h;
+	if (vx1 > fb->w) vx1 = fb->w;
+	if (vy1 > fb->h) vy1 = fb->h;
 	truecolour = truecolour_rp(rp);
 	if (!truecolour)
 	{
 		get_pens(win->WScreen);
-		row = AllocVec((ULONG)fb->w + 16, MEMF_ANY);
+		row = AllocVec((ULONG)w + 16, MEMF_ANY);
 		if (!row)
 			return;
 	}
 	for (i = 0; i < n; i++)
 	{
 		int rx0 = rects[i].x0, ry0 = rects[i].y0, rx1 = rects[i].x1, ry1 = rects[i].y1, x, y;
-		if (rx1 > fb->w) rx1 = fb->w;
-		if (ry1 > fb->h) ry1 = fb->h;
-		if (rx1 > w) rx1 = w;
-		if (ry1 > h) ry1 = h;
+		int dx, dy, bw, bh;
+		if (rx0 < ox) rx0 = ox;
+		if (ry0 < oy) ry0 = oy;
+		if (rx1 > vx1) rx1 = vx1;
+		if (ry1 > vy1) ry1 = vy1;
 		if (rx0 >= rx1 || ry0 >= ry1)
 			continue;
+		dx = x0 + (rx0 - ox);
+		dy = y0 + (ry0 - oy);
+		bw = rx1 - rx0;
+		bh = ry1 - ry0;
 		if (truecolour)
 		{
 			CGX_WPA((APTR)fb->px, (UWORD)rx0, (UWORD)ry0, (UWORD)(fb->stride * 4), rp,
-			        (UWORD)(x0 + rx0), (UWORD)(y0 + ry0), (UWORD)(rx1 - rx0), (UWORD)(ry1 - ry0), RECTFMT_ARGB);
+			        (UWORD)dx, (UWORD)dy, (UWORD)bw, (UWORD)bh, RECTFMT_ARGB);
 			continue;
 		}
 		for (y = ry0; y < ry1; y++)
@@ -231,31 +243,37 @@ void desktop_blit(struct Window* win, int x0, int y0, int w, int h, const struct
 				int k = q3((c >> 16) & 255, t) * 9 + q3((c >> 8) & 255, t) * 3 + q3(c & 255, t);
 				row[x - rx0] = (UBYTE)(s_pens[k] >= 0 ? s_pens[k] : -2 - s_pens[k]);
 			}
-			WriteChunkyPixels(rp, (UWORD)(x0 + rx0), (UWORD)(y0 + y), (UWORD)(x0 + rx1 - 1), (UWORD)(y0 + y),
-			                  row, rx1 - rx0);
+			WriteChunkyPixels(rp, (UWORD)dx, (UWORD)(dy + (y - ry0)), (UWORD)(dx + bw - 1),
+			                  (UWORD)(dy + (y - ry0)), row, bw);
 		}
 	}
 	if (row)
 		FreeVec(row);
 }
 
-/* All of it: the buffer where it is, the theme's background outside it */
-void desktop_draw_fb(struct Window* win, int x0, int y0, int w, int h, const struct rdp_fb* fb)
+/* All of the visible pan window: the buffer where it is, theme background outside */
+void desktop_draw_fb(struct Window* win, int x0, int y0, int w, int h, const struct rdp_fb* fb,
+                     int ox, int oy)
 {
 	struct RastPort* rp = win->RPort;
 	struct rdp_rect all;
 	int dw, dh;
 	if (w <= 0 || h <= 0 || !fb)
 		return;
-	dw = w < fb->w ? w : fb->w;
-	dh = h < fb->h ? h : fb->h;
+	if (ox < 0) ox = 0;
+	if (oy < 0) oy = 0;
+	if (ox > fb->w) ox = fb->w;
+	if (oy > fb->h) oy = fb->h;
+	dw = w < (fb->w - ox) ? w : (fb->w - ox);
+	dh = h < (fb->h - oy) ? h : (fb->h - oy);
 	SetAPen(rp, 0);
 	if (w > dw)
 		RectFill(rp, x0 + dw, y0, x0 + w - 1, y0 + h - 1);
 	if (h > dh)
 		RectFill(rp, x0, y0 + dh, x0 + dw - 1, y0 + h - 1);
-	all.x0 = all.y0 = 0;
-	all.x1 = (uint16_t)dw;
-	all.y1 = (uint16_t)dh;
-	desktop_blit(win, x0, y0, w, h, fb, &all, 1);
+	all.x0 = (uint16_t)ox;
+	all.y0 = (uint16_t)oy;
+	all.x1 = (uint16_t)(ox + dw);
+	all.y1 = (uint16_t)(oy + dh);
+	desktop_blit(win, x0, y0, w, h, fb, &all, 1, ox, oy);
 }

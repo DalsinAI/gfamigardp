@@ -19,7 +19,7 @@ struct rdp_settings
 	const char* domain;
 	uint32_t protocols;       /* RDP_PROTOCOL_* to offer */
 	uint16_t width, height;
-	uint8_t depth;            /* 8, 15, 16, 24 */
+	uint8_t depth;            /* 8, 15, 16, 24, 32 */
 	int64_t timeout_us;
 	uint16_t early_caps;      /* TS_UD_CS_CORE earlyCapabilityFlags; 0: RNS_UD_CS_SUPPORT_ERRINFO_PDU only */
 	uint16_t color_depths;    /* supportedColorDepths; 0: 24, 16, 15 bpp (0x0007) */

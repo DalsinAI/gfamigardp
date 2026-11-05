@@ -355,7 +355,7 @@ static void do_connect(struct cw* c)
 	d = olui_select_index(c->depth);
 	s = olui_select_index(c->sec);
 	if (r < 0 || r >= ui_nresolutions) r = 1;
-	if (d < 0 || d >= ui_ndepths) d = 2;
+	if (d < 0 || d >= ui_ndepths) d = ui_ndepths - 1;   /* True colour (32-bit) */
 	if (s < 0 || s >= ui_nsecurity) s = 0;
 	info->width = ui_resolutions[r].w ? ui_resolutions[r].w : (UWORD)c->app->screen->Width;
 	info->height = ui_resolutions[r].h ? ui_resolutions[r].h : (UWORD)c->app->screen->Height;
@@ -383,17 +383,26 @@ static void do_connect(struct cw* c)
 	params.protocols = ui_security[s].protocols;
 	/* The Graphics Pipeline ([MS-RDPEGFX]) is how the desktop is drawn:
 	 * the drdynvc channel, RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL (0x0100),
-	 * a 32 bpp session (RNS_UD_CS_WANT_32BPP_SESSION 0x0002, 32 in
-	 * supportedColorDepths 0x0008, highColorDepth 24) and errinfo (0x0001).
-	 * Honest now: Uncompressed, Planar and RemoteFX Progressive decode, the
-	 * caps never offer AVC. depth 32 is what the lab server accepted.
-	 * GFX surfaces are 32-bit whatever the depth chosen; the screen's own
-	 * depth decides how it is shown (true colour, or dithered to pens). */
+	 * RNS_UD_CS_WANT_32BPP_SESSION (0x0002) and errinfo (0x0001). Honest now:
+	 * Uncompressed, Planar and RemoteFX Progressive; caps never offer AVC.
+	 * Honour the Colours dropdown for highColorDepth when it is 24 or 32.
+	 * Picks below 24 still negotiate 32 bpp so GNOME's GFX path starts
+	 * (docs/LAB.txt); GFX surfaces are always 32-bit; the Amiga screen's
+	 * own depth decides how they are shown (true colour or dithered pens). */
 	strncpy(params.channels, "drdynvc", sizeof(params.channels) - 1);
-	params.early_caps = 0x0103;
-	params.color_depths = 0x000F;
-	params.depth = 32;
 	params.gfx = 1;
+	if (params.gfx && params.depth < 24)
+		params.depth = 32;
+	params.early_caps = 0x0103;           /* ERRINFO | WANT_32BPP | DYNVC_GFX */
+	params.color_depths = 0x000F;         /* 24 | 16 | 15 | 32 bpp */
+	if (params.depth == 32)
+		params.color_depths |= 0x0008;
+	else if (params.depth == 24)
+		params.color_depths |= 0x0001;
+	else if (params.depth == 16)
+		params.color_depths |= 0x0002;
+	else if (params.depth == 15)
+		params.color_depths |= 0x0004;
 	take_password(c, params.password, sizeof(params.password));
 	c->ct.conn = conn;
 	snprintf(line, sizeof(line), "Connecting to %s...", info->host);
@@ -584,7 +593,7 @@ int connect_window(struct app* app, const char* host, struct session_info* info)
 			c.favs = olui_find(c.ui, "favs");
 			c.status = olui_find(c.ui, "status");
 			olui_select_set(c.ui, c.res, 1);
-			olui_select_set(c.ui, c.depth, 2);
+			olui_select_set(c.ui, c.depth, ui_ndepths - 1);  /* True colour (32-bit) */
 			fill_list(&c);
 			if (info->user[0]) olui_set_text(c.ui, c.user, info->user);
 			if (info->domain[0]) olui_set_text(c.ui, c.domain, info->domain);

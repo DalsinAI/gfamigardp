@@ -21,6 +21,7 @@ const struct ui_depth ui_depths[] = {
 	{ "32,768 colours (15-bit)", 15 },
 	{ "65,536 colours (16-bit)", 16 },
 	{ "16.7 million colours (24-bit)", 24 },
+	{ "True colour (32-bit)", 32 },   /* default: GNOME's Graphics Pipeline */
 };
 /* RDP_PROTOCOL_SSL 1, RDP_PROTOCOL_HYBRID 2 (core/x224.h) */
 const struct ui_security ui_security[] = {
@@ -94,6 +95,7 @@ const char ui_toolbar_markup[] =
 	"<button id=disc title='Close the session (Amiga-D)'>Disconnect</button>"
 	"<button id=cad title='Send Ctrl-Alt-Del to the computer'>Ctrl-Alt-Del</button>"
 	"<button id=full title='The session on a screen of its own (Amiga-F)'>Full screen</button>"
+	"<button id=home title='Show the top-left of the remote desktop (Amiga-H)'>Home</button>"
 	"<button id=keys title='Which keys go to the computer'>Keys...</button>"
 	"<spacer></spacer><label id=where></label>"
 	"</row>";

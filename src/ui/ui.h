@@ -71,9 +71,11 @@ void desktop_free(void);
  * rects (fb coordinates), or all of it; clipped to the w x h band */
 struct rdp_fb;
 struct rdp_rect;
+/* ox, oy: top-left of the band in framebuffer coordinates (pan). */
 void desktop_blit(struct Window* win, int x, int y, int w, int h, const struct rdp_fb* fb,
-                  const struct rdp_rect* rects, int n);
-void desktop_draw_fb(struct Window* win, int x, int y, int w, int h, const struct rdp_fb* fb);
+                  const struct rdp_rect* rects, int n, int ox, int oy);
+void desktop_draw_fb(struct Window* win, int x, int y, int w, int h, const struct rdp_fb* fb,
+                     int ox, int oy);
 
 struct NewMenu;
 /* menus: GadTools, Amiga-key shortcuts */

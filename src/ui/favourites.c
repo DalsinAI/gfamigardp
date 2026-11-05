@@ -58,7 +58,7 @@ static int parse_line(char* line, struct favourite* f)
 	if (n > 2) copy_field(f->user, sizeof(f->user), part[2], strlen(part[2]));
 	if (n > 3) copy_field(f->domain, sizeof(f->domain), part[3], strlen(part[3]));
 	f->res = n > 4 ? clamp_index(part[4], ui_nresolutions) : 1;
-	f->depth = n > 5 ? clamp_index(part[5], ui_ndepths) : 2;
+	f->depth = n > 5 ? clamp_index(part[5], ui_ndepths) : ui_ndepths - 1;
 	f->security = n > 6 ? clamp_index(part[6], ui_nsecurity) : 0;
 	return 1;
 }

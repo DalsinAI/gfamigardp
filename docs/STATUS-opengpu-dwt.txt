@@ -25,3 +25,11 @@ Still needs GPU backend
   path would set OGPU_ONGPU_BIT in supports().
 
 Clean-room: MS-RDPRFX + existing AmigaChrome OpenGPU patterns; no FreeRDP.
+
+Shipped
+-------
+- gfopenrtg 73a68a6 (library 0.26, ROM-clean ogpu_dwt.c)
+- gfopensdk b4ccc88 (stream.h v1.9)
+- gfamigardp 2726796 (idwt hook + ogpu_dwt.c)
+- Stove: gfopengpu.library 256480 bytes sha256 f5188837…
+- Lab gfamigardp-ui refreshed (GFAmigaRDP + gfopengpu.library), screen :9028

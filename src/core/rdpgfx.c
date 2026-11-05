@@ -278,8 +278,30 @@ static int wire_to_surface_2(struct rdp_gfx* g, struct rdp_stream* s)
 		rdp_s_skip(s, len);
 		return 0;
 	}
-	rc = rdp_progressive_decode(&sf->prog, &g->mem, s->p + s->pos, len, sf->px, sf->w, sf->h,
-	                            prog_rect, sf, &g->st.prog);
+	{
+		struct rdp_prog_clip clip, *pc = NULL;
+		if (g->view_set && sf->mapped)
+		{
+			int32_t x0 = (int32_t)g->view_x0 - (int32_t)sf->ox;
+			int32_t y0 = (int32_t)g->view_y0 - (int32_t)sf->oy;
+			int32_t x1 = (int32_t)g->view_x1 - (int32_t)sf->ox;
+			int32_t y1 = (int32_t)g->view_y1 - (int32_t)sf->oy;
+			if (x0 < 0) x0 = 0;
+			if (y0 < 0) y0 = 0;
+			if (x1 > sf->w) x1 = sf->w;
+			if (y1 > sf->h) y1 = sf->h;
+			if (x1 > x0 && y1 > y0)
+			{
+				clip.x0 = (uint16_t)x0;
+				clip.y0 = (uint16_t)y0;
+				clip.x1 = (uint16_t)x1;
+				clip.y1 = (uint16_t)y1;
+				pc = &clip;
+			}
+		}
+		rc = rdp_progressive_decode(&sf->prog, &g->mem, s->p + s->pos, len, sf->px, sf->w, sf->h,
+		                            prog_rect, sf, &g->st.prog, pc);
+	}
 	rdp_s_skip(s, len);
 	if (rc < 0)
 		g->st.prog_errors++;
@@ -645,4 +667,56 @@ int rdp_gfx_input(struct rdp_gfx* g, const uint8_t* data, size_t len)
 	if (rc == 0 && !g->in_frame)
 		rdp_gfx_flush(g);   /* anything drawn outside a frame (Map, for one) */
 	return rc;
+}
+
+void rdp_gfx_set_view(struct rdp_gfx* g, uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+	if (!g)
+		return;
+	if (x1 <= x0 || y1 <= y0)
+	{
+		g->view_set = 0;
+		g->view_x0 = g->view_y0 = g->view_x1 = g->view_y1 = 0;
+		return;
+	}
+	if (x1 > g->fb.w) x1 = g->fb.w;
+	if (y1 > g->fb.h) y1 = g->fb.h;
+	g->view_set = 1;
+	g->view_x0 = x0;
+	g->view_y0 = y0;
+	g->view_x1 = x1;
+	g->view_y1 = y1;
+}
+
+int rdp_gfx_paint_view(struct rdp_gfx* g)
+{
+	int i, n = 0;
+	if (!g || !g->view_set)
+		return 0;
+	for (i = 0; i < RDP_GFX_MAX_SURFACES; i++)
+	{
+		struct rdp_gfx_surface* sf = &g->surf[i];
+		int32_t x0, y0, x1, y1;
+		int rc;
+		if (!sf->used || !sf->mapped || !sf->prog.tiles)
+			continue;
+		x0 = (int32_t)g->view_x0 - (int32_t)sf->ox;
+		y0 = (int32_t)g->view_y0 - (int32_t)sf->oy;
+		x1 = (int32_t)g->view_x1 - (int32_t)sf->ox;
+		y1 = (int32_t)g->view_y1 - (int32_t)sf->oy;
+		if (x0 < 0) x0 = 0;
+		if (y0 < 0) y0 = 0;
+		if (x1 > sf->w) x1 = sf->w;
+		if (y1 > sf->h) y1 = sf->h;
+		if (x1 <= x0 || y1 <= y0)
+			continue;
+		rc = rdp_progressive_paint(&sf->prog, &g->mem, sf->px, sf->w, sf->h,
+		                           (uint16_t)x0, (uint16_t)y0, (uint16_t)x1, (uint16_t)y1,
+		                           prog_rect, sf, &g->st.prog);
+		if (rc > 0)
+			n += rc;
+	}
+	if (n)
+		rdp_gfx_flush(g);
+	return n;
 }

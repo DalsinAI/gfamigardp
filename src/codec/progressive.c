@@ -340,25 +340,30 @@ static void idwt2(const int32_t* LL, int las, const int32_t* HL, const int32_t* 
 #define RDP_PROG_TMP (33 * 33 + 2 * 33 * 64 + 2 * 66 + 64 * 64)
 void rdp_prog_idwt(int32_t* buf, int re, int32_t* tmp)
 {
-	int32_t *ll = tmp, *lp = ll + 33 * 33, *hp = lp + 33 * 64, *t = hp + 33 * 64, *out = t + 2 * 66;
-	int off[NBANDS], w, h, i, l3, h3, l2, h2, l1, h1, n2, n1;
+	/* tmp layout: ll (33*33) | lp (33*64) | hp (33*64) | t (2*66) | mid (64*64).
+	 * mid holds the level-3/2 intermediate; the final 64x64 lands in buf. */
+	int32_t *ll = tmp, *lp = ll + 33 * 33, *hp = lp + 33 * 64, *t = hp + 33 * 64, *mid = t + 2 * 66;
+	int off[NBANDS], i, l3, h3, l2, h2, l1, h1, n2, n1, rr;
+	band_init();
+	rr = re ? 1 : 0;
 	for (i = 0; i < NBANDS; i++)
-		rdp_prog_band_layout(re, i, &off[i], &w, &h);
+		off[i] = s_band[rr][i].off;
 	level_sizes(re, 3, &l3, &h3);
 	level_sizes(re, 2, &l2, &h2);
 	level_sizes(re, 1, &l1, &h1);
 	n2 = l3 + h3;   /* 17 or 16 = l2 */
 	n1 = l2 + h2;   /* 33 or 32 = l1 */
-	/* level 3 -> LL2 in out */
+	/* level 3 -> LL2 in mid */
 	idwt2(buf + off[B_LL3], l3, buf + off[B_HL3], buf + off[B_LH3], buf + off[B_HH3], l3, h3,
-	      re ? l3 - 1 : l3, n2, out, lp, hp, t);
+	      re ? l3 - 1 : l3, n2, mid, lp, hp, t);
 	/* level 2 -> LL1 in ll */
-	idwt2(out, n2, buf + off[B_HL2], buf + off[B_LH2], buf + off[B_HH2], l2, h2,
+	idwt2(mid, n2, buf + off[B_HL2], buf + off[B_LH2], buf + off[B_HH2], l2, h2,
 	      re ? l2 - 1 : l2, n1, ll, lp, hp, t);
-	/* level 1 -> 64 x 64; Reduce-Extrapolate pads HL1/LH1/HH1 to 32 and drops the 65th */
+	/* level 1 -> 64 x 64 written straight into buf. Horizontal has already
+	 * copied HL1/LH1/HH1 into lp/hp, so overwriting the band layout is safe
+	 * and saves a 16 KiB memcpy per component (48 KiB per tile). */
 	idwt2(ll, n1, buf + off[B_HL1], buf + off[B_LH1], buf + off[B_HH1], l1, h1,
-	      re ? l1 - 1 : l1, 64, out, lp, hp, t);
-	memcpy(buf, out, 64 * 64 * sizeof(int32_t));
+	      re ? l1 - 1 : l1, 64, buf, lp, hp, t);
 }
 
 /* ---- tiles ---- */
@@ -387,6 +392,8 @@ struct ctx
 	int32_t* work;             /* 4096 */
 	int32_t* tmp;              /* RDP_PROG_TMP */
 	int32_t* ycc;              /* 3 x 4096 */
+	uint8_t have_clip;
+	uint16_t cx0, cy0, cx1, cy1;   /* exclusive view clip in surface coords */
 };
 
 static void unpack_quant(const uint8_t* q5, uint8_t out[NBANDS])
@@ -443,16 +450,34 @@ static struct rdp_prog_tile* tile_state(struct ctx* c, uint16_t xi, uint16_t yi,
 
 static uint8_t clamp8(int32_t v)
 {
-	return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
+	if ((uint32_t)v <= 255u)
+		return (uint8_t)v;
+	return (uint8_t)(v < 0 ? 0 : 255);
+}
+
+static int tile_in_clip(const struct ctx* c, uint16_t xi, uint16_t yi)
+{
+	int32_t tx = (int32_t)xi * 64, ty = (int32_t)yi * 64, tx1 = tx + 64, ty1 = ty + 64;
+	if (!c->have_clip)
+		return 1;
+	return !(tx1 <= c->cx0 || ty1 <= c->cy0 || tx >= c->cx1 || ty >= c->cy1);
 }
 
 /* Dequantize, inverse DWT, colour convert and write the tile, clipped to
- * the stream's rectangles and the surface. */
-static void render(struct ctx* c, const struct rdp_prog_tile* t, uint16_t xi, uint16_t yi)
+ * the stream's rectangles and the surface. Skips the heavy path when the
+ * tile lies outside the view clip (coefs stay; paint brings them back). */
+static void render(struct ctx* c, struct rdp_prog_tile* t, uint16_t xi, uint16_t yi)
 {
 	int comp, b, i, r;
-	int off, bw, bh;
 	int32_t tx = (int32_t)xi * 64, ty = (int32_t)yi * 64;
+	const int re = t->re ? 1 : 0;
+
+	if (!tile_in_clip(c, xi, yi))
+	{
+		c->st->view_skip++;
+		return;
+	}
+	band_init();
 	for (comp = 0; comp < 3; comp++)
 	{
 		const int16_t* co = t->coef + comp * RDP_PROG_COEFS;
@@ -460,9 +485,19 @@ static void render(struct ctx* c, const struct rdp_prog_tile* t, uint16_t xi, ui
 		for (b = 0; b < NBANDS; b++)
 		{
 			int sh = (int)t->quant[comp][b] - 6;
-			rdp_prog_band_layout(t->re, b, &off, &bw, &bh);
-			for (i = off; i < off + bw * bh; i++)
-				w[i] = sh >= 0 ? (int32_t)co[i] * (1 << sh) : (int32_t)co[i] >> -sh;
+			int off = s_band[re][b].off, n = (int)s_band[re][b].w * s_band[re][b].h;
+			if (sh >= 0)
+			{
+				int32_t m = 1 << sh;
+				for (i = off; i < off + n; i++)
+					w[i] = (int32_t)co[i] * m;
+			}
+			else
+			{
+				int rs = -sh;
+				for (i = off; i < off + n; i++)
+					w[i] = (int32_t)co[i] >> rs;
+			}
 		}
 		rdp_prog_idwt(w, t->re, c->tmp);
 	}
@@ -474,6 +509,13 @@ static void render(struct ctx* c, const struct rdp_prog_tile* t, uint16_t xi, ui
 		if (y0 < ty) y0 = ty;
 		if (x1 > tx + 64) x1 = tx + 64;
 		if (y1 > ty + 64) y1 = ty + 64;
+		if (c->have_clip)
+		{
+			if (x0 < c->cx0) x0 = c->cx0;
+			if (y0 < c->cy0) y0 = c->cy0;
+			if (x1 > c->cx1) x1 = c->cx1;
+			if (y1 > c->cy1) y1 = c->cy1;
+		}
 		if (x1 > c->w) x1 = c->w;
 		if (y1 > c->h) y1 = c->h;
 		if (x0 >= x1 || y0 >= y1)
@@ -485,8 +527,7 @@ static void render(struct ctx* c, const struct rdp_prog_tile* t, uint16_t xi, ui
 			const int32_t* Cb = Y + RDP_PROG_COEFS;
 			const int32_t* Cr = Cb + RDP_PROG_COEFS;
 			int n = (int)(x1 - x0), i;
-			/* [MS-RDPRFX] 3.1.8.2.5: Y + 128; the matrix in 16.16.
-			 * Pointer form avoids the per-pixel x index and the * c->w add. */
+			/* [MS-RDPRFX] 3.1.8.2.5: Y + 128; the matrix in 16.16. */
 			for (i = 0; i < n; i++)
 			{
 				int32_t yy = Y[i] + 128, cb = Cb[i], cr = Cr[i];
@@ -499,6 +540,7 @@ static void render(struct ctx* c, const struct rdp_prog_tile* t, uint16_t xi, ui
 		if (c->on_rect)
 			c->on_rect(c->user, (uint16_t)x0, (uint16_t)y0, (uint16_t)x1, (uint16_t)y1);
 	}
+	t->painted = 1;
 }
 
 static int first_pass(struct ctx* c, const struct region* rg, const uint8_t* p, size_t len, int simple)
@@ -532,10 +574,12 @@ static int first_pass(struct ctx* c, const struct region* rg, const uint8_t* p, 
 		return RDP_PROG_E_PROTO;
 	diff = (flags & RFX_TILE_DIFFERENCE) != 0;
 	progressive = quality != 0xFF;
-	t = tile_state(c, xi, yi, c->diffing || progressive || diff, progressive);
+	/* Keep state when a view clip is set so off-screen tiles can be painted
+	 * after a pan without waiting for the server to send them again. */
+	t = tile_state(c, xi, yi, c->diffing || progressive || diff || c->have_clip, progressive);
 	if (!t)
 	{
-		if (diff || progressive || xi >= (c->w + 63) / 64 || yi >= (c->h + 63) / 64)
+		if (diff || progressive || c->have_clip || xi >= (c->w + 63) / 64 || yi >= (c->h + 63) / 64)
 		{
 			c->st->nomem += (xi < (c->w + 63) / 64 && yi < (c->h + 63) / 64);
 			c->st->skipped++;
@@ -543,6 +587,7 @@ static int first_pass(struct ctx* c, const struct region* rg, const uint8_t* p, 
 		}
 		t = &c->scratch;   /* a full, final, original tile needs no state */
 	}
+	t->painted = 0;
 	t->re = (uint8_t)rg->re;
 	pos = hdr;
 	for (comp = 0; comp < 3; comp++)
@@ -657,6 +702,7 @@ static int upgrade_pass(struct ctx* c, const struct region* rg, const uint8_t* p
 		}
 	}
 	c->st->upgrade++;
+	t->painted = 0;   /* coefs changed; view-skip must repaint later */
 	render(c, t, xi, yi);
 	return 0;
 }
@@ -705,7 +751,8 @@ static int region(struct ctx* c, const uint8_t* p, size_t len)
 
 int rdp_progressive_decode(struct rdp_prog_surface* ps, const struct rdp_mem* mem,
                            const uint8_t* data, size_t len, uint32_t* px, uint16_t w, uint16_t h,
-                           rdp_prog_rect_fn on_rect, void* user, struct rdp_prog_stats* st)
+                           rdp_prog_rect_fn on_rect, void* user, struct rdp_prog_stats* st,
+                           const struct rdp_prog_clip* clip)
 {
 	struct ctx c;
 	struct rdp_prog_stats dummy;
@@ -715,6 +762,14 @@ int rdp_progressive_decode(struct rdp_prog_surface* ps, const struct rdp_mem* me
 	memset(&c, 0, sizeof(c));
 	if (!st)
 		st = &dummy;
+	if (clip && clip->x1 > clip->x0 && clip->y1 > clip->y0)
+	{
+		c.have_clip = 1;
+		c.cx0 = clip->x0;
+		c.cy0 = clip->y0;
+		c.cx1 = clip->x1 > w ? w : clip->x1;
+		c.cy1 = clip->y1 > h ? h : clip->y1;
+	}
 	/* pass 1: the rectangles of every region (they may share tiles, 2.2.4.2.1.5) */
 	for (pos = 0; pos + 6 <= len;)
 	{
@@ -782,6 +837,79 @@ int rdp_progressive_decode(struct rdp_prog_surface* ps, const struct rdp_mem* me
 	}
 	rdp_mem_free(mem, rects);
 	return rc;
+}
+
+int rdp_progressive_paint(struct rdp_prog_surface* ps, const struct rdp_mem* mem,
+                          uint32_t* px, uint16_t w, uint16_t h,
+                          uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1,
+                          rdp_prog_rect_fn on_rect, void* user, struct rdp_prog_stats* st)
+{
+	struct ctx c;
+	struct rdp_prog_stats dummy;
+	uint8_t rect[8];
+	size_t bytes;
+	uint8_t* buf;
+	uint16_t xi0, yi0, xi1, yi1, xi, yi;
+	int n = 0;
+
+	if (!ps || !ps->tiles || !px || x0 >= x1 || y0 >= y1)
+		return 0;
+	if (x1 > w) x1 = w;
+	if (y1 > h) y1 = h;
+	if (!st)
+		st = &dummy;
+	memset(&c, 0, sizeof(c));
+	bytes = RDP_PROG_COEFS * sizeof(int32_t) + RDP_PROG_TMP * sizeof(int32_t) +
+	        3 * RDP_PROG_COEFS * sizeof(int32_t);
+	if (!(buf = (uint8_t*)rdp_mem_alloc(mem, bytes)))
+		return RDP_PROG_E_NOMEM;
+	c.ps = ps;
+	c.mem = mem;
+	c.px = px;
+	c.w = w;
+	c.h = h;
+	c.on_rect = on_rect;
+	c.user = user;
+	c.st = st;
+	c.have_clip = 1;
+	c.cx0 = x0;
+	c.cy0 = y0;
+	c.cx1 = x1;
+	c.cy1 = y1;
+	c.work = (int32_t*)(void*)buf;
+	c.tmp = c.work + RDP_PROG_COEFS;
+	c.ycc = c.tmp + RDP_PROG_TMP;
+	/* one TS_RFX_RECT covering the paint window (x, y, width, height) */
+	rect[0] = (uint8_t)(x0); rect[1] = (uint8_t)(x0 >> 8);
+	rect[2] = (uint8_t)(y0); rect[3] = (uint8_t)(y0 >> 8);
+	{
+		uint16_t rw = (uint16_t)(x1 - x0), rh = (uint16_t)(y1 - y0);
+		rect[4] = (uint8_t)rw; rect[5] = (uint8_t)(rw >> 8);
+		rect[6] = (uint8_t)rh; rect[7] = (uint8_t)(rh >> 8);
+	}
+	c.rects = rect;
+	c.nrects = 1;
+	xi0 = (uint16_t)(x0 / 64);
+	yi0 = (uint16_t)(y0 / 64);
+	xi1 = (uint16_t)((x1 + 63) / 64);
+	yi1 = (uint16_t)((y1 + 63) / 64);
+	if (xi1 > ps->gw) xi1 = ps->gw;
+	if (yi1 > ps->gh) yi1 = ps->gh;
+	for (yi = yi0; yi < yi1; yi++)
+		for (xi = xi0; xi < xi1; xi++)
+		{
+			struct rdp_prog_tile* tile = ps->tiles[(size_t)yi * ps->gw + xi];
+			if (!tile || !tile->coef || tile->painted)
+				continue;
+			render(&c, tile, xi, yi);
+			if (tile->painted)
+			{
+				st->painted++;
+				n++;
+			}
+		}
+	rdp_mem_free(mem, buf);
+	return n;
 }
 
 void rdp_progressive_free(struct rdp_prog_surface* ps, const struct rdp_mem* mem)

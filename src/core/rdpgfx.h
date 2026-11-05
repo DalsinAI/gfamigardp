@@ -7,8 +7,8 @@
  *
  * H.264 is never offered: every RDPGFX 10.x capability set we send has
  * RDPGFX_CAPS_FLAG_AVC_DISABLED, 8.1 never has AVC420_ENABLED, and 10.1
- * (no flags field) is not sent. Codecs: Uncompressed and Planar decode;
- * the others are counted and skipped (the region stays as it was).
+ * (no flags field) is not sent. Codecs: Uncompressed, Planar and RemoteFX
+ * Progressive; ClearCodec/Alpha/CAVIDEO are counted and skipped.
  * Plain C99. MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #ifndef RDP_RDPGFX_H
@@ -138,6 +138,10 @@ struct rdp_gfx
 	struct rdp_gfx_surface surf[RDP_GFX_MAX_SURFACES];
 	struct rdp_gfx_cache_entry* cache;   /* RDP_GFX_CACHE_SLOTS, index = slot - 1 */
 	struct rdp_gfx_stats st;
+	/* UI pan window in Graphics Output Buffer coordinates (exclusive x1/y1).
+	 * Progressive skips idwt/YCbCr outside it; rdp_gfx_paint_view fills gaps. */
+	uint8_t view_set;
+	uint16_t view_x0, view_y0, view_x1, view_y1;
 };
 
 /* w x h: the first output buffer size (Reset Graphics will change it). */
@@ -160,5 +164,9 @@ int rdp_gfx_input(struct rdp_gfx* g, const uint8_t* data, size_t len);
 int rdp_gfx_process_pdus(struct rdp_gfx* g, const uint8_t* p, size_t len);
 /* Copies the dirty parts of mapped surfaces into fb (EndFrame does it). */
 void rdp_gfx_flush(struct rdp_gfx* g);
+/* The band the UI is showing (fb coordinates). NULL-size clears the clip. */
+void rdp_gfx_set_view(struct rdp_gfx* g, uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
+/* Paint Progressive tiles that were view-skipped into the current view, then flush. */
+int rdp_gfx_paint_view(struct rdp_gfx* g);
 
 #endif

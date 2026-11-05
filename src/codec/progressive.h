@@ -31,6 +31,7 @@ struct rdp_prog_tile
 	uint8_t bitpos[3][10];
 	uint8_t quant[3][10];        /* the regular factors of the last pass */
 	uint8_t re;                  /* Reduce-Extrapolate layout */
+	uint8_t painted;             /* 1: pixels written for the current coefs */
 };
 
 /* Per surface: a grid of tile states, made as tiles arrive. */
@@ -44,6 +45,14 @@ struct rdp_prog_surface
 struct rdp_prog_stats
 {
 	uint32_t simple, first, upgrade, skipped, nomem;
+	uint32_t view_skip;            /* idwt/YCbCr skipped: tile outside the view clip */
+	uint32_t painted;              /* tiles written by rdp_progressive_paint */
+};
+
+/* Exclusive surface clip for decode/paint; NULL or zero-size = whole surface. */
+struct rdp_prog_clip
+{
+	uint16_t x0, y0, x1, y1;
 };
 
 /* Decodes one RFX_PROGRESSIVE_BITMAP_STREAM into px (w x h, 0xAARRGGBB,
@@ -52,7 +61,13 @@ struct rdp_prog_stats
 typedef void (*rdp_prog_rect_fn)(void* user, uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
 int rdp_progressive_decode(struct rdp_prog_surface* ps, const struct rdp_mem* mem,
                            const uint8_t* data, size_t len, uint32_t* px, uint16_t w, uint16_t h,
-                           rdp_prog_rect_fn on_rect, void* user, struct rdp_prog_stats* st);
+                           rdp_prog_rect_fn on_rect, void* user, struct rdp_prog_stats* st,
+                           const struct rdp_prog_clip* clip);
+/* Re-render stored tiles that intersect [x0,y0)..[x1,y1) into px (after a pan). */
+int rdp_progressive_paint(struct rdp_prog_surface* ps, const struct rdp_mem* mem,
+                          uint32_t* px, uint16_t w, uint16_t h,
+                          uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1,
+                          rdp_prog_rect_fn on_rect, void* user, struct rdp_prog_stats* st);
 void rdp_progressive_free(struct rdp_prog_surface* ps, const struct rdp_mem* mem);
 
 /* Exposed for the host tests. */

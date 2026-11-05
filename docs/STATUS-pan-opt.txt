@@ -1,0 +1,35 @@
+GFAmigaRDP — UI pan + Progressive speed (Sacredtrees), 2026-11-05 Europe/London
+
+Pushed to DalsinAI/gfamigardp main (this pass continues from 7833793):
+  91f04e2  UI: pan a remote desk bigger than the band; honour Colours (32-bit default)
+  7833793  codec: speed Progressive on 68040; frame-ack queueDepth 1
+  (next)  view-tile skip + safer pan binding + idwt no final memcpy
+
+UI
+- Pan: Alt/Ctrl + left-drag, or middle-drag (plain left-drag free for remote mouse).
+  View menu (Home / pan half-window), toolbar Home, Amiga-H.
+- Mode line: "800 x 600 of 3840 x 1080 +x,+y, 32-bit - …" when remote > band.
+- No scale (DESIGN: 68040 has no time for it).
+- Colours: "True colour (32-bit)" default; 24/32 for highColorDepth.
+- session syncs gfx view each poll and paints skipped Progressive tiles on pan/resize.
+
+Progressive / blit
+- Band layout table (both DWT layouts), MSB bit accumulator for RLGR/SRL,
+  tighter YCbCr (clamp8 early-out), dequant via s_band table.
+- View clip: tiles outside the pan band skip idwt/YCbCr (coefs kept);
+  rdp_progressive_paint / rdp_gfx_paint_view fill them when the band moves.
+- idwt: final 64x64 written into buf (no 16 KiB memcpy × 3 per tile).
+- Blit clips dirty rects to the pan window (ox/oy).
+- Frame ack queueDepth=1 so the server can ease off.
+
+Tests / build
+- Host: test_progressive all ok (DWT err ≤7).
+- Host idwt microbench (x500, this box): ~0.006–0.007 s — not a 68040 number.
+- View-skip savings scale with (desk − band)/desk; e.g. 3840×1080 into 800×600
+  is roughly 7/8 of tiles skipping the heavy path until pan.
+
+Gaps
+- No fit-to-window scale yet.
+- Further 68k: RLGR asm, idwt asm, optional discard of far-off coefs under memory pressure.
+- No live RDP smoke this pass (password not on CLI; ASKPASS/Probe skipped).
+- Lab deploy SHA filled after stove/lab_put.

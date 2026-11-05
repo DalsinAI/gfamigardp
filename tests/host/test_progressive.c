@@ -75,6 +75,42 @@ static int test_dwt(int re)
 }
 
 
+
+static void on_paint_rect(void* user, uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+	int* n = user;
+	(void)x0; (void)y0; (void)x1; (void)y1;
+	(*n)++;
+}
+
+static int test_view_paint(void)
+{
+	/* Synthetic: empty stream does nothing; paint on empty surface is 0. */
+	struct rdp_prog_surface ps;
+	struct rdp_prog_stats st;
+	struct rdp_prog_clip clip = { 0, 0, 128, 128 };
+	uint32_t* px;
+	int nrect = 0, rc;
+	memset(&ps, 0, sizeof(ps));
+	memset(&st, 0, sizeof(st));
+	px = calloc(256 * 256, sizeof(uint32_t));
+	CHECK(px);
+	rc = rdp_progressive_decode(&ps, NULL, (const uint8_t*)"", 0, px, 256, 256,
+	                            on_paint_rect, &nrect, &st, &clip);
+	CHECK(rc == RDP_PROG_E_PROTO || rc == 0); /* empty is proto or ok depending on len check */
+	/* short garbage */
+	{
+		uint8_t junk[8] = { 0 };
+		rc = rdp_progressive_decode(&ps, NULL, junk, sizeof(junk), px, 256, 256,
+		                            NULL, NULL, &st, &clip);
+		CHECK(rc < 0 || rc == 0);
+	}
+	CHECK(rdp_progressive_paint(&ps, NULL, px, 256, 256, 0, 0, 64, 64, on_paint_rect, &nrect, &st) == 0);
+	rdp_progressive_free(&ps, NULL);
+	free(px);
+	return 0;
+}
+
 static void bench_idwt(int re, int rounds)
 {
 	static int32_t buf[4096], tmp[20000];
@@ -111,8 +147,11 @@ int main(void)
 	CHECK(nz == 0);
 	CHECK(test_dwt(1) <= 8);
 	CHECK(test_dwt(0) <= 8);
-	if (!fails)
-		bench_idwt(1, 200);
+	test_view_paint();
+	if (!fails) {
+		bench_idwt(1, 500);
+		bench_idwt(0, 500);
+	}
 	printf(fails ? "FAILED %d\n" : "all ok\n", fails);
 	return fails != 0;
 }

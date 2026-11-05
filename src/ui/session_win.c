@@ -14,6 +14,7 @@
 
 #include <exec/types.h>
 #include <intuition/intuition.h>
+#include <devices/inputevent.h>
 #include <libraries/gadtools.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
@@ -225,7 +226,7 @@ static void on_tb(olui* ui, const olui_event* ev, void* data)
 	if (!strcmp(ev->id, "disc")) action(s, M_DISC);
 	else if (!strcmp(ev->id, "cad")) action(s, M_CAD);
 	else if (!strcmp(ev->id, "full")) action(s, M_FULL);
-	else if (!strcmp(ev->id, "keys")) status(s, "Keys: Amiga-key menus stay local. Drag the desktop to pan; Amiga-H homes.");
+	else if (!strcmp(ev->id, "keys")) status(s, "Keys: Amiga-key menus stay local. Alt/Ctrl-drag or middle-drag pans; Amiga-H homes.");
 	else if (!strcmp(ev->id, "home")) pan_home(s);
 }
 
@@ -254,11 +255,31 @@ static void clamp_pan(struct sw* s)
 	if (s->view_oy < 0) s->view_oy = 0;
 }
 
+/* Tell the Graphics Pipeline which band is on screen so Progressive can
+ * skip idwt/YCbCr for off-screen tiles, then paint them when we pan. */
+static void sync_view(struct sw* s)
+{
+	int x, y, iw, ih;
+	if (!s->conn || !s->conn->gfx)
+		return;
+	clamp_pan(s);
+	band(s, &x, &y, &iw, &ih);
+	(void)x; (void)y;
+	if (iw < 0) iw = 0;
+	if (ih < 0) ih = 0;
+	rdp_gfx_set_view(s->conn->gfx, (uint16_t)s->view_ox, (uint16_t)s->view_oy,
+	                 (uint16_t)(s->view_ox + iw),
+	                 (uint16_t)(s->view_oy + ih));
+}
+
 static void pan_by(struct sw* s, int dx, int dy)
 {
 	s->view_ox += dx;
 	s->view_oy += dy;
 	clamp_pan(s);
+	sync_view(s);
+	if (s->conn && s->conn->gfx)
+		rdp_gfx_paint_view(s->conn->gfx);
 	draw_desktop(s);
 	show_mode(s);
 }
@@ -266,6 +287,10 @@ static void pan_by(struct sw* s, int dx, int dy)
 static void pan_home(struct sw* s)
 {
 	s->view_ox = s->view_oy = 0;
+	clamp_pan(s);
+	sync_view(s);
+	if (s->conn && s->conn->gfx)
+		rdp_gfx_paint_view(s->conn->gfx);
 	draw_desktop(s);
 	show_mode(s);
 }
@@ -389,8 +414,8 @@ int session_window(struct app* app, const struct session_info* info)
 		snprintf(line, sizeof(line), "%s%s%s", info->user, info->user[0] ? " on " : "", info->host);
 		olui_set_text(s.tb, olui_find(s.tb, "where"), line);
 		show_mode(&s);
-		status(&s, info->demo ? "Demo session: no server. Drag to pan; Amiga-H homes. Amiga-D disconnects." :
-		                        "Connected and secured. Drag the desktop to pan; Amiga-H homes.");
+		status(&s, info->demo ? "Demo: Alt/Ctrl-drag or middle-drag pans; Amiga-H homes. Amiga-D disconnects." :
+		                        "Connected. Alt/Ctrl-drag or middle-drag pans; Amiga-H homes.");
 		/* both strips need library 11; the static libolui always has them */
 		/* the strips first: olui_amiga_layout draws all it has, the whole window
 		 * when it has no strip yet (and the status bar's row went to the top) */
@@ -436,6 +461,7 @@ int session_window(struct app* app, const struct session_info* info)
 				it.fd = s.conn->t.sock;
 				it.events = AMIPR_WAIT_READ;
 				it.revents = 0;
+				sync_view(&s);   /* Progressive view-tile skip follows the pan */
 				rc = amipr_wait_signals(&it, 1, timeout, &sigs);
 				sig = sigs;
 				if (rc != 0 || timeout == 0)
@@ -458,6 +484,7 @@ int session_window(struct app* app, const struct session_info* info)
 			{
 				ULONG cls = m->Class;
 				UWORD code = m->Code;
+				UWORD qual = m->Qualifier;
 				WORD mx = m->MouseX, my = m->MouseY;
 				int r1, r2;
 				if (cls == IDCMP_MENUPICK)
@@ -490,24 +517,31 @@ int session_window(struct app* app, const struct session_info* info)
 					olui_amiga_draw(s.atb);
 					olui_amiga_draw(s.asb);
 					clamp_pan(&s);
+					sync_view(&s);
+					if (s.conn && s.conn->gfx)
+						rdp_gfx_paint_view(s.conn->gfx);
 					draw_desktop(&s);
 					show_mode(&s);
 				}
 				else if (cls == IDCMP_MOUSEBUTTONS)
 				{
 					int bx, by, iw, ih;
+					int in_band, pan_btn;
 					band(&s, &bx, &by, &iw, &ih);
-					if (code == SELECTDOWN &&
-					    (int)mx >= bx && (int)mx < bx + iw &&
-					    (int)my >= by && (int)my < by + ih)
+					in_band = (int)mx >= bx && (int)mx < bx + iw &&
+					          (int)my >= by && (int)my < by + ih;
+					/* Plain left-drag stays free for remote mouse later.
+					 * Pan: middle-drag, or Alt/Ctrl + left-drag. */
+					pan_btn = (code == MIDDLEDOWN) ||
+					          (code == SELECTDOWN &&
+					           (qual & (IEQUALIFIER_LALT | IEQUALIFIER_RALT | IEQUALIFIER_CONTROL)));
+					if (pan_btn && in_band)
 					{
-						/* Left-drag pans until remote input is wired (then
-						 * middle-button / a modifier will take over). */
 						s.panning = 1;
 						s.pan_mx = (int)mx;
 						s.pan_my = (int)my;
 					}
-					else if (code == SELECTUP || code == MENUUP)
+					else if (code == SELECTUP || code == MIDDLEUP || code == MENUUP)
 						s.panning = 0;
 				}
 				else if (cls == IDCMP_MOUSEMOVE && s.panning)

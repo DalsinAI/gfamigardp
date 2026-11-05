@@ -1,0 +1,6 @@
+STATUS — pin gfopenntlm 1.1.1 for v0.1.0-rc2 drawer
+2026-11-05 Europe/London
+
+tools/fetch_deps.sh: gfopenntlm 956084c (1.1.0) → 4bb461a (v1.1.1).
+CredSSP len-0 / UTF-8 / MaxLen hardenings + early secret wipe in the
+drawer Libs/gfopenntlm.library. Sacredtrees / Team 6.

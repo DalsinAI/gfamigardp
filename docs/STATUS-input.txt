@@ -23,3 +23,8 @@ Gaps
 - Pointer shape / relative mouse later.
 
 Lab / stove filled after deploy.
+
+Lab deploy
+- stove os32-gcc16 j20261105T134737-bf35df @ c555e22 exit 0
+- lab_put SYS:C/GFAmigaRDP sha256 e383872ae3bad73bde86ccb8548b26fcbd9fed2bd5c219ce7cc67e13b2f8baad
+- tip c555e2218a296dd1e7188b57ec878025a3d7db50

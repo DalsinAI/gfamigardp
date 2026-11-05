@@ -97,3 +97,8 @@ Amiga build (skeptic claim 1 / Amiga proof)
   GFAmigaRDP 434296 bytes, sha256 efecf13c6fdfec88aca1334eab8dfb731a77c8ff7880770c304c76e9eeacb86c
   (ogpu_prog.c compiled into the binary; address maths still need a live
   Cradle ONGPU session to exercise at run time — none claimed yet).
+- skeptic pass 2 tip e69bae6 (real-core failure tests, empty_skip, lab force):
+  stove os32-gcc16 job j20261105T211920-d0563d: green.
+  GFAmigaRDP 434456 bytes, sha256 764954d7a88a7241b267ba8bad14069467bfe944fe0437aabc52a3f149550753
+  Host: tools/test_prog_ogpu.sh 40 seeds pixel-exact + the five failure /
+  batch paths (GFOPENRTG=gfopenrtg 41f4a91, unchanged).

@@ -89,8 +89,8 @@ Not yet
 - No live Windows / GNOME RD pixel capture through the new path yet.
 - No 68040 timings of Submit-vs-in-tree (gated off until ONGPU).
 
-Pins: gfopensdk 5da85f0 (stream.h v1.10 skeptic notes, branch team6/stream-v1.10-rfx).
-Re-pin after the SDK PR merges if it is squashed.
+Pins: gfopensdk 007965a (main: squash of gfopensdk #44, gfopengpu 0.27 /
+stream.h v1.10 gathered from gfopenrtg main 5af78d8, squash of gfopenrtg #177).
 
 Amiga build (skeptic claim 1 / Amiga proof)
 - stove os32-gcc16 job j20261105T205953-beb8c2 at 48bd420: green.
@@ -102,3 +102,8 @@ Amiga build (skeptic claim 1 / Amiga proof)
   GFAmigaRDP 434456 bytes, sha256 764954d7a88a7241b267ba8bad14069467bfe944fe0437aabc52a3f149550753
   Host: tools/test_prog_ogpu.sh 40 seeds pixel-exact + the five failure /
   batch paths (GFOPENRTG=gfopenrtg 41f4a91, unchanged).
+- merged pin 7c6a0c8 (gfopensdk 007965a): stove os32-gcc16 job
+  j20261105T214247-d8ed56: green, GFAmigaRDP byte-identical (434456 bytes,
+  sha256 764954d7…); gfopenrtg main 5af78d8 library/opengpu job
+  j20261105T214248-23f56f: green, gfopengpu.library byte-identical (260604
+  bytes, sha256 b19c191d…). Lab gfamigardp-ui already carries both.

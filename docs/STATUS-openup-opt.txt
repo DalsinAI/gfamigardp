@@ -24,3 +24,11 @@ OpenUp RDP optimisations (v0.1.0-rc2+)
    - session_window installs on open, removes on close.
 
 Skipped on classic 68040 lab: Multicore, OpenMedia (no cores board; Media stage-0).
+
+Shipped
+-------
+- e0a1a92 OpenUp: OpenGPU dirty blit, Progressive squeeze, YUV pilot
+- 7d1124c Fix: OpenGPUBase in ogpu_yuv for RDPProbe link
+- stove j20261105T165051-1f6ec7 os32-gcc16 green (exit 0)
+- lab:gfamigardp-ui SYS:C/GFAmigaRDP sha256 6344e28e0f38dc90d2c10d94c95e4634a17acd9ca7218e94d0788a35e97d0462
+  (screen http://127.0.0.1:9028/)

@@ -10,6 +10,8 @@
 
 #include "markup.h"
 
+struct rdp_conn;
+
 #define APP_NAME "GFAmigaRDP"
 #define APP_VERSION "0.1"
 
@@ -38,6 +40,7 @@ struct session_info
 	UBYTE depth;
 	char security[128];  /* the negotiated protocol, the TLS cipher and how far it got, in words */
 	int demo;            /* 1: no server, a test pattern */
+	struct rdp_conn* conn;   /* the app's: open (live) after licensing, for the session window */
 };
 
 struct app
@@ -47,6 +50,7 @@ struct app
 	int demo;
 	struct favourite fav[MAX_FAVOURITES];
 	int nfav;
+	struct rdp_conn* conn;     /* the one connection (session.h), AllocVec'd in main */
 };
 
 /* favourites.c: ENVARC:GFAmigaRDP/Favourites, one per line, tab between fields */

@@ -12,7 +12,9 @@
  */
 #include "ui.h"
 #include "amipr.h"
+#include "session.h"
 
+#include <exec/memory.h>
 #include <dos/dos.h>
 #include <dos/rdargs.h>
 #include <libraries/gadtools.h>
@@ -90,6 +92,11 @@ int main(void)
 		fav_load(&app);
 
 	memset(&info, 0, sizeof(info));
+	/* the connection the connection window opens and the session window
+	 * goes on with (review B1); one at a time */
+	if (!app.demo && (app.conn = AllocVec(sizeof(struct rdp_conn), MEMF_CLEAR)) != NULL)
+		rdp_conn_init(app.conn);
+	info.conn = app.conn;
 	/* USER/K and DOMAIN/K fill the window's fields (and the demo session's title) */
 	if (args[ARG_USER])
 		snprintf(info.user, sizeof(info.user), "%s", (const char*)args[ARG_USER]);
@@ -118,6 +125,11 @@ int main(void)
 	}
 
 out:
+	if (app.conn)
+	{
+		rdp_conn_close(app.conn);
+		FreeVec(app.conn);
+	}
 	desktop_free();
 	if (app.visual)
 		FreeVisualInfo(app.visual);

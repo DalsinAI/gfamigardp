@@ -8,6 +8,8 @@
  * MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #include "ui.h"
+#include "session.h"
+#include "amipr.h"
 
 #include <exec/types.h>
 #include <intuition/intuition.h>
@@ -45,12 +47,77 @@ struct sw
 	olui_amiga *atb, *asb;
 	int tb_h, sb_h;
 	const struct session_info* info;
+	struct rdp_conn* conn;   /* live: the session's connection, closed when the window closes */
 	int result; /* -1 running, 0 quit, 1 back to the connection window */
+	int shown_act;           /* what the status bar last said, so it changes only when the session does */
+	uint32_t shown_pdus;
 };
 
 static void status(struct sw* s, const char* text)
 {
 	olui_set_text(s->sb, olui_find(s->sb, "status"), text);
+}
+
+/* the mode line: the size the computer gave in its Demand Active once it has */
+static void show_mode(struct sw* s)
+{
+	char line[400];
+	const struct session_info* info = s->info;
+	unsigned w = info->width, h = info->height, d = info->depth;
+	if (s->conn && s->conn->act >= RDP_ACT_DEMAND && s->conn->demand.width)
+	{
+		w = s->conn->demand.width;
+		h = s->conn->demand.height;
+		if (s->conn->demand.bpp)
+			d = s->conn->demand.bpp;
+	}
+	/* plain ASCII in the strips (review M9) */
+	snprintf(line, sizeof(line), "%u x %u, %u-bit - %s", w, h, d, info->security);
+	olui_set_text(s->sb, olui_find(s->sb, "mode"), line);
+}
+
+/* the session's state in words, on the status line */
+static void show_session(struct sw* s, int rc)
+{
+	struct rdp_conn* c = s->conn;
+	char line[300];
+	const char* ei;
+	if (!c)
+		return;
+	if (c->act == s->shown_act && rc >= 0 && (c->pdus - s->shown_pdus) < 50)
+		return;
+	s->shown_act = c->act;
+	s->shown_pdus = c->pdus;
+	ei = rdp_error_info_text(c->error_info);
+	if (c->act == RDP_ACT_ENDED || (rc < 0 && rc != AMIPR_ETIMEOUT))
+	{
+		if (c->error_info)
+			snprintf(line, sizeof(line), "The computer ended the session: %s (0x%08lX).",
+			         ei ? ei : "error", (unsigned long)c->error_info);
+		else if (c->mr.disconnect_reason)
+			snprintf(line, sizeof(line), "The computer ended the session (reason %u).", c->mr.disconnect_reason - 1);
+		else
+			snprintf(line, sizeof(line), "The session stopped (%s): %s", rdp_act_name(c->act), rdp_error_text(rc));
+	}
+	else if (c->act == RDP_ACT_ACTIVE)
+		snprintf(line, sizeof(line), "Session active; %lu PDUs (%lu fast-path updates). The desktop is not drawn yet.",
+		         (unsigned long)c->pdus, (unsigned long)c->fp.updates);
+	else
+		snprintf(line, sizeof(line), "Starting the session: %s.", rdp_act_name(c->act));
+	status(s, line);
+	show_mode(s);
+}
+
+/* reads what the computer sent, without waiting; ends the connection when it ended */
+static void poll_session(struct sw* s)
+{
+	int rc;
+	if (!s->conn || !s->conn->live)
+		return;
+	rc = rdp_conn_poll(s->conn, 16);
+	show_session(s, rc);
+	if (rc < 0)
+		rdp_conn_close(s->conn);
 }
 
 static void action(struct sw* s, int what)
@@ -124,6 +191,8 @@ int session_window(struct app* app, const struct session_info* info)
 
 	memset(&s, 0, sizeof(s));
 	s.info = info;
+	s.conn = (!info->demo && info->conn && info->conn->live) ? info->conn : NULL;
+	s.shown_act = -1;
 	s.result = -1;
 	s.tb_h = fh + 12;
 	s.sb_h = fh + 6;
@@ -152,9 +221,7 @@ int session_window(struct app* app, const struct session_info* info)
 		olui_on(s.tb, NULL, OLUI_CLICK, on_tb, &s);
 		snprintf(line, sizeof(line), "%s%s%s", info->user, info->user[0] ? " on " : "", info->host);
 		olui_set_text(s.tb, olui_find(s.tb, "where"), line);
-		snprintf(line, sizeof(line), "%u \xC3\x97 %u, %u-bit \xC2\xB7 %s", (unsigned)info->width,
-		         (unsigned)info->height, (unsigned)info->depth, info->security);
-		olui_set_text(s.sb, olui_find(s.sb, "mode"), line);
+		show_mode(&s);
 		status(&s, info->demo ? "Demo session: no server. Amiga-D disconnects." :
 		                        "Connected and secured. The desktop itself is not drawn yet.");
 		/* both strips need library 11; the static libolui always has them */
@@ -166,6 +233,20 @@ int session_window(struct app* app, const struct session_info* info)
 	if (ok)
 	{
 		draw_desktop(&s);
+		if (s.conn)
+		{
+			/* the Capabilities Exchange and the finalization on the connection
+			 * the connection window opened (review B1): it waits for each PDU,
+			 * at most the transport's timeout */
+			int rc;
+			status(&s, "Starting the session: waiting for Demand Active.");
+			olui_amiga_draw(s.asb);
+			rc = rdp_conn_activate(s.conn, 64);
+			show_session(&s, rc);
+			if (rc < 0 && rc != AMIPR_ETIMEOUT)
+				rdp_conn_close(s.conn);
+			olui_amiga_draw(s.asb);
+		}
 		while (s.result < 0)
 		{
 			struct IntuiMessage* m;
@@ -183,6 +264,12 @@ int session_window(struct app* app, const struct session_info* info)
 					menu_pick(&s, code);
 					continue;
 				}
+				/* the strips first (gfopenlayout's strip contract): on NEWSIZE
+				 * each lays itself out again for the new width, on
+				 * REFRESHWINDOW each draws itself; then the desktop between
+				 * them, inside the program's BeginRefresh/EndRefresh so the
+				 * damage list is cleared only after everything is back
+				 * (review H3, M5) */
 				r1 = olui_amiga_event(s.atb, m);
 				r2 = olui_amiga_event(s.asb, m);
 				ReplyMsg(&m->ExecMessage);
@@ -195,14 +282,25 @@ int session_window(struct app* app, const struct session_info* info)
 					EndRefresh(s.win, TRUE);
 				}
 				else if (cls == IDCMP_NEWSIZE)
+				{
+					/* a new size: the strips laid out again (above), the
+					 * desktop band between them is now somewhere else */
+					olui_amiga_draw(s.atb);
+					olui_amiga_draw(s.asb);
 					draw_desktop(&s);
+				}
+				else if (cls == IDCMP_INTUITICKS)
+					poll_session(&s);
 			}
+			poll_session(&s);
 			olui_amiga_draw(s.atb);
 			olui_amiga_draw(s.asb);
 		}
 	}
 	else
 		s.result = 1;
+	if (s.conn)
+		rdp_conn_close(s.conn);   /* the Disconnect Provider Ultimatum when it is still up */
 	olui_amiga_free(s.atb);
 	olui_free(s.tb);
 	olui_amiga_free(s.asb);

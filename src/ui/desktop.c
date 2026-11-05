@@ -16,6 +16,7 @@
 #include <graphics/gfx.h>
 #include <graphics/view.h>
 #include <graphics/rastport.h>
+#include <graphics/text.h>
 #include <proto/exec.h>
 #include <proto/graphics.h>
 #include <inline/macros.h>
@@ -89,6 +90,20 @@ static int q3(int v, int t)
 	return s > 2 ? 2 : s;
 }
 
+/* text at (x, y) in a band of w x h at (x0, y0), or as much as fits */
+static void band_text(struct RastPort* rp, int x0, int y0, int w, int h, int x, int y, const char* str)
+{
+	struct TextExtent te;
+	ULONG n;
+	if (x < 0 || y < 0 || x >= w || y + rp->TxHeight > h)
+		return;
+	n = TextFit(rp, (STRPTR)str, (ULONG)strlen(str), &te, NULL, 1, (UWORD)(w - x), (UWORD)rp->TxHeight);
+	if (!n)
+		return;
+	Move(rp, x0 + x, y0 + y + rp->TxBaseline);
+	Text(rp, (STRPTR)str, n);
+}
+
 void desktop_draw(struct Window* win, int x0, int y0, int w, int h, const struct session_info* info)
 {
 	struct RastPort* rp = win->RPort;
@@ -143,16 +158,15 @@ void desktop_draw(struct Window* win, int x0, int y0, int w, int h, const struct
 	}
 	FreeVec(row);
 
-	/* the words in the first mock window's title bar and client area */
+	/* the words in the first mock window's title bar and client area,
+	 * kept inside the drawn band (review M6): a line whose row is not all
+	 * in it is left out, and one too long is cut where the band ends */
 	SetDrMd(rp, JAM1);
 	SetAPen(rp, (ULONG)(s_white >= 0 ? s_white : 2));
-	Move(rp, x0 + W / 12 + 6, y0 + H / 10 + 4 + rp->TxBaseline);
-	Text(rp, (STRPTR) "Remote desktop", 14);
+	band_text(rp, x0, y0, dw, dh, W / 12 + 6, H / 10 + 4, "Remote desktop");
 	SetAPen(rp, (ULONG)(s_black >= 0 ? s_black : 1));
-	sprintf(line, "%s: a test pattern, %d x %d", info->demo ? "Demo session" : "Not drawn yet", W, H);
-	Move(rp, x0 + W / 12 + 8, y0 + H / 10 + 30 + rp->TxBaseline);
-	Text(rp, (STRPTR)line, (ULONG)strlen(line));
-	sprintf(line, "Computer: %s", info->host);
-	Move(rp, x0 + W / 12 + 8, y0 + H / 10 + 30 + rp->TxHeight * 2 + rp->TxBaseline);
-	Text(rp, (STRPTR)line, (ULONG)strlen(line));
+	snprintf(line, sizeof(line), "%s: a test pattern, %d x %d", info->demo ? "Demo session" : "Not drawn yet", W, H);
+	band_text(rp, x0, y0, dw, dh, W / 12 + 8, H / 10 + 30, line);
+	snprintf(line, sizeof(line), "Computer: %s", info->host);
+	band_text(rp, x0, y0, dw, dh, W / 12 + 8, H / 10 + 30 + rp->TxHeight * 2, line);
 }

@@ -20,7 +20,7 @@ PINS='gfopensdk a7384f334c3eb64b30dd27cc5a6f480d72471f74
 gfopentls aa6f6a5a34a0558351ece25f29066f51a4e85499
 gfopenlayout da4a066ee2fe4a7ca93d4175c44f38a5b9ac80e6
 amicradle-guest 27832e77a4590810b40e57b3c182abb4e7fa366c
-gfopenntlm 8f032083b974b18c52f3bb10fb71479aed8435e3'
+gfopenntlm 956084c3ffaadc4b2acab79e21ee3e7fc204405a'
 
 fetch() {
     name=$1 pin=$2 dst="$DEPS/$1"

@@ -12,7 +12,10 @@ void rdp_settings_default(struct rdp_settings* s)
 {
 	memset(s, 0, sizeof(*s));
 	s->port = 3389;
-	s->protocols = RDP_PROTOCOL_SSL | RDP_PROTOCOL_HYBRID;
+	/* HYBRID_EX too ([MS-RDPBCGR] 2.2.1.1.1): a server that has it (Windows
+	 * 8 / 2012 on) then says "access denied" before the session starts, in
+	 * the Early User Authorization Result, rather than after (nla.c reads it) */
+	s->protocols = RDP_PROTOCOL_SSL | RDP_PROTOCOL_HYBRID | RDP_PROTOCOL_HYBRID_EX;
 	s->width = 800;
 	s->height = 600;
 	s->depth = 16;
@@ -52,6 +55,7 @@ const char* rdp_error_text(int rc)
 		case RDP_E_SPACE: return "The computer's answer was too long.";
 		case RDP_E_ARG: return "A setting is not valid.";
 		case RDP_E_MCS: return "The computer refused an MCS step.";
+		case RDP_E_LICENSE: return "The computer asked for a licence exchange, which this version does not do yet.";
 		default: return "The connection failed.";
 	}
 }

@@ -7,6 +7,7 @@
  */
 #include "mcs.h"
 #include "stream.h"
+#include "utf16.h"
 #include "amipr.h"
 #include <exec/memory.h>
 #include <proto/exec.h>
@@ -51,13 +52,21 @@ static int tpkt_send(struct rdp_transport* t, struct rdp_stream* s)
 	return rdp_transport_write(t, s->p, s->pos);
 }
 
+static int tpkt_data(uint8_t* buf, size_t n, struct rdp_stream* s);
+
 /* one TPKT holding an X.224 Data TPDU: s is set on what follows it */
 static int tpkt_read(struct rdp_transport* t, uint8_t* buf, struct rdp_stream* s)
 {
 	int n = rdp_transport_read_tpkt(t, buf, BUF);
 	if (n < 0)
 		return n;
-	rdp_s_init(s, buf, (size_t)n);
+	return tpkt_data(buf, (size_t)n, s);
+}
+
+/* the X.224 Data TPDU in a TPKT of n bytes: s is set on what follows it */
+static int tpkt_data(uint8_t* buf, size_t n, struct rdp_stream* s)
+{
+	rdp_s_init(s, buf, n);
 	rdp_s_skip(s, RDP_TPKT_HEADER);
 	if (rdp_s_get_u8(s) != 2 || rdp_s_get_u8(s) != RDP_X224_DT)
 		return RDP_E_PROTO;
@@ -406,14 +415,19 @@ static int join(struct rdp_transport* t, uint8_t* buf, struct rdp_mcs_result* r,
 
 /* ---- Client Info PDU (2.2.1.11) ---- */
 
-static size_t latin1_len(const char* p) { return p ? strlen(p) : 0; }
-
+/* the strings as UTF-8 to UTF-16LE, decoded as gfopenntlm decodes them
+ * for NLA (utf16.h), so a user name or password with letters beyond
+ * ASCII is the same text in the NTLM AUTHENTICATE, the TSCredentials and
+ * here; ending in a NUL code unit */
 static void utf16z(struct rdp_stream* s, const char* p)
 {
-	const uint8_t* q = (const uint8_t*)(p ? p : "");
-	while (*q)
-		rdp_s_u16le(s, *q++);
-	rdp_s_u16le(s, 0);
+	size_t n = rdp_utf16_len(p);
+	if (rdp_s_need(s, n + 2))
+	{
+		s->pos += rdp_utf16_put(p, s->p + s->pos, n);
+		s->p[s->pos++] = 0;
+		s->p[s->pos++] = 0;
+	}
 }
 
 static int send_client_info(struct rdp_transport* t, uint8_t* buf, const struct rdp_settings* set,
@@ -438,9 +452,9 @@ static int send_client_info(struct rdp_transport* t, uint8_t* buf, const struct 
 	rdp_s_u32le(&s, 0);                  /* CodePage */
 	rdp_s_u32le(&s, 0x00000001 | 0x00000002 | 0x00000008 | 0x00000010 | 0x00000040 | 0x00000100 |
 	                0x00010000);         /* MOUSE DISABLECTRLALTDEL AUTOLOGON UNICODE LOGONNOTIFY ENABLEWINDOWSKEY LOGONERRORS */
-	rdp_s_u16le(&s, (uint16_t)(2 * latin1_len(set->domain)));
-	rdp_s_u16le(&s, (uint16_t)(2 * latin1_len(set->user)));
-	rdp_s_u16le(&s, (uint16_t)(2 * latin1_len(password)));
+	rdp_s_u16le(&s, (uint16_t)rdp_utf16_len(set->domain));   /* bytes, the NUL not counted */
+	rdp_s_u16le(&s, (uint16_t)rdp_utf16_len(set->user));
+	rdp_s_u16le(&s, (uint16_t)rdp_utf16_len(password));
 	rdp_s_u16le(&s, 0);                  /* cbAlternateShell */
 	rdp_s_u16le(&s, 0);                  /* cbWorkingDir */
 	utf16z(&s, set->domain);
@@ -512,7 +526,20 @@ static int read_license(struct rdp_transport* t, uint8_t* buf, struct rdp_mcs_re
 				r->lic_error = rdp_s_get_u32le(&s);
 				r->lic_state = rdp_s_get_u32le(&s);
 			}
-			return s.err ? RDP_E_PROTO : 0;
+			if (s.err)
+				return RDP_E_PROTO;
+			/* [MS-RDPBCGR] 1.3.1.1 phase 8, [MS-RDPELE] 1.3.3: a server with
+			 * no licensing to do (GNOME Remote Desktop, xrdp, Windows in
+			 * its grace period with "valid client" on) ends it at once with
+			 * STATUS_VALID_CLIENT and ST_NO_TRANSITION, and Demand Active
+			 * follows. A LICENSE_REQUEST starts the exchange of [MS-RDPELE]
+			 * 3.2 (New License Request: a premaster secret under the
+			 * server's RSA key, then the Platform Challenge Response), which
+			 * this client does not do yet: RDP_E_LICENSE, said plainly,
+			 * rather than waiting for a Demand Active that cannot come. */
+			if (r->lic_type == 0xFF && r->lic_error == 0x07)
+				return 0;
+			return RDP_E_LICENSE;
 		}
 		/* a Set Error Info PDU ahead of a disconnection (2.2.5.1.1):
 		 * TS_SHARECONTROLHEADER, TS_SHAREDATAHEADER, errorInfo */
@@ -530,6 +557,114 @@ static int read_license(struct rdp_transport* t, uint8_t* buf, struct rdp_mcs_re
 		}
 	}
 	return RDP_E_PROTO;
+}
+
+/* ---- after licensing: the session's PDUs ---- */
+
+int rdp_mcs_send_data(struct rdp_transport* t, uint8_t* buf, size_t size, uint16_t user, uint16_t channel,
+                      const uint8_t* data, size_t len)
+{
+	struct rdp_stream s;
+	tpkt_begin(&s, buf, size);
+	rdp_s_u8(&s, MCS_SDRQ << 2);
+	rdp_s_u16be(&s, (uint16_t)(user - MCS_BASE_CHANNEL));
+	rdp_s_u16be(&s, channel);
+	rdp_s_u8(&s, 0x70);                  /* dataPriority high, segmentation begin|end */
+	per_len(&s, len);
+	rdp_s_bytes(&s, data, len);
+	return tpkt_send(t, &s);
+}
+
+/* one PDU of either kind ([MS-RDPBCGR] 2.2.9.1.2 fast-path, or a TPKT):
+ * the first byte's action bits tell them apart (5.3.8, 2.2.9.1.2) */
+int rdp_pdu_read(struct rdp_transport* t, uint8_t* buf, size_t size, struct rdp_mcs_result* r, struct rdp_pdu* pdu)
+{
+	size_t len, head;
+	int rc;
+	memset(pdu, 0, sizeof(*pdu));
+	if (size < 8)
+		return RDP_E_SPACE;
+	rc = rdp_transport_read_full(t, buf, 2);
+	if (rc < 0)
+		return rc;
+	if ((buf[0] & 3) == 0)
+	{
+		/* fpOutputHeader, then a length in one or two bytes (2.2.9.1.2) */
+		head = 2;
+		len = buf[1];
+		if (len & 0x80)
+		{
+			rc = rdp_transport_read_full(t, buf + 2, 1);
+			if (rc < 0)
+				return rc;
+			len = ((len & 0x7f) << 8) | buf[2];
+			head = 3;
+		}
+		if (buf[0] & 0x80)               /* FASTPATH_OUTPUT_ENCRYPTED: standard RDP security only */
+			return RDP_E_PROTO;
+		if (len < head || len > size)
+			return len > size ? RDP_E_SPACE : RDP_E_PROTO;
+		rc = rdp_transport_read_full(t, buf + head, len - head);
+		if (rc < 0)
+			return rc;
+		pdu->fastpath = 1;
+		pdu->data = buf + head;
+		pdu->len = len - head;
+		return 0;
+	}
+	if (buf[0] != RDP_TPKT_VERSION)
+		return RDP_E_PROTO;
+	rc = rdp_transport_read_full(t, buf + 2, 2);
+	if (rc < 0)
+		return rc;
+	len = ((size_t)buf[2] << 8) | buf[3];
+	if (len < RDP_TPKT_HEADER + 3 || len > size)
+		return len > size ? RDP_E_SPACE : RDP_E_PROTO;
+	rc = rdp_transport_read_full(t, buf + 4, len - 4);
+	if (rc < 0)
+		return rc;
+	{
+		struct rdp_stream s;
+		unsigned choice;
+		uint8_t b;
+		rc = tpkt_data(buf, len, &s);
+		if (rc < 0)
+			return rc;
+		b = rdp_s_get_u8(&s);
+		choice = b >> 2;
+		pdu->choice = (uint8_t)choice;
+		pdu->data = buf;
+		pdu->len = 0;
+		if (choice == MCS_DPUM)
+		{
+			uint8_t c = rdp_s_get_u8(&s);
+			r->disconnect_reason = 1 + (((b & 3u) << 1) | (c >> 7));
+			return AMIPR_ECLOSED;
+		}
+		if (choice != MCS_SDIN)
+			return 0;                    /* nothing for the session */
+		rdp_s_skip(&s, 2);               /* initiator */
+		pdu->channel = rdp_s_get_u16be(&s);
+		rdp_s_skip(&s, 1);               /* dataPriority, segmentation */
+		len = per_get_len(&s);
+		if (s.err || len > rdp_s_left(&s))
+			return RDP_E_PROTO;
+		pdu->data = s.p + s.pos;
+		pdu->len = len;
+	}
+	return 0;
+}
+
+int rdp_mcs_disconnect(struct rdp_transport* t)
+{
+	/* Disconnect Provider Ultimatum, reason rn-user-requested (3): the
+	 * 3-bit reason straddles the first two bytes (T.125 ALIGNED PER) */
+	uint8_t buf[16];
+	static const uint8_t dpum[2] = { (MCS_DPUM << 2) | (3 >> 1), (3 & 1) << 7 };
+	struct rdp_stream s;
+	tpkt_begin(&s, buf, sizeof(buf));
+	rdp_s_bytes(&s, dpum, 2);
+	return tpkt_send(t, &s);
 }
 
 int rdp_mcs_connect(struct rdp_transport* t, const struct rdp_settings* s, uint32_t selected,
@@ -601,6 +736,8 @@ int rdp_mcs_connect(struct rdp_transport* t, const struct rdp_settings* s, uint3
 		goto done;
 	r->stage = RDP_MCS_ST_INFO_SENT;
 	rc = read_license(t, buf, r);
+	if (rc == RDP_E_LICENSE)
+		r->stage = RDP_MCS_ST_LICENSING;   /* reached, and it says why it stops (lic_type, lic_error) */
 	if (rc < 0)
 		goto done;
 	r->stage = RDP_MCS_ST_LICENSING;

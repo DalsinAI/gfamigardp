@@ -127,7 +127,8 @@ static int read_tsrequest(struct rdp_transport* t, uint8_t* buf, size_t size)
 }
 
 int rdp_nla(struct rdp_transport* t, const struct rdp_settings* s, const char* password,
-            const uint8_t* pubkey, size_t pubkey_len, int hybrid_ex, struct rdp_nla_result* res)
+            const uint8_t* pubkey, size_t pubkey_len, const uint8_t* cb, size_t cb_len,
+            int hybrid_ex, struct rdp_nla_result* res)
 {
 	struct GNCredSSPConfig cfg;
 	struct GNCredSSP* c;
@@ -155,6 +156,15 @@ int rdp_nla(struct rdp_transport* t, const struct rdp_settings* s, const char* p
 	cfg.ServerName = s->host;
 	cfg.PublicKey = pubkey;
 	cfg.PublicKeyLength = (ULONG)pubkey_len;
+	/* gfopenntlm 1.1: the TLS channel bindings, the certificate hash; the
+	 * library adds "tls-server-end-point:" (RFC 5929 4.1). A 1.0 library
+	 * reads only up to MaxVersion and leaves the exchange unbound. */
+	if (cb && cb_len)
+	{
+		cfg.Flags = GNF_CB_TLS_SERVER_END_POINT;
+		cfg.ChannelBindings = cb;
+		cfg.ChannelBindingsLength = (ULONG)cb_len;
+	}
 	c = in ? GN_CredSSPNew(&cfg, &err) : NULL;
 	if (!c)
 	{
@@ -199,6 +209,7 @@ int rdp_nla(struct rdp_transport* t, const struct rdp_settings* s, const char* p
 	res->version = GN_CredSSPGetAttr(c, GNA_VERSION);
 	res->peer_version = GN_CredSSPGetAttr(c, GNA_PEERVERSION);
 	res->ntlm_peer_version = GN_CredSSPGetAttr(c, GNA_NTLMPEERVERSION);
+	res->bound = GN_CredSSPGetAttr(c, GNA_CHANNELBINDINGS) != 0;
 	GN_CredSSPFree(c);
 	/* HYBRID_EX: the server answers the credentials with a 4-byte Early
 	 * User Authorization Result ([MS-RDPBCGR] 2.2.10.2) */

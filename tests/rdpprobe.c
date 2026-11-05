@@ -6,6 +6,11 @@
  * certificate and the logon's result. The password is never printed.
  *
  *   RDPProbe HOST/A PORT/N USER/K DOMAIN/K PASSWORD/K RDP/S TLS/S NLA/S DUMP/K
+ *            ASKPASS/S ACTIVATE/S WAIT/N
+ * ASKPASS: the password typed at a prompt, not shown (the console in raw
+ * mode), rather than on the command line. ACTIVATE: after licensing, the
+ * Capabilities Exchange and finalization (session.c), then WAIT seconds
+ * (default 5) of what the computer sends, counted; then a disconnect.
  * DUMP=file: the NLA exchange in hex, up to the AUTHENTICATE and the
  * server's answer (never the credentials), to check a logon offline.
  * MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
@@ -15,6 +20,7 @@
 #include "x509.h"
 #include "nla.h"
 #include "mcs.h"
+#include "session.h"
 
 #include <dos/dos.h>
 #include <proto/exec.h>
@@ -24,8 +30,104 @@
 
 static const char version[] = "$VER: RDPProbe 0.2 (04.11.2026) AmiCradle Team";
 
-#define TEMPLATE "HOST/A,PORT/N,USER/K,DOMAIN/K,PASSWORD/K,RDP/S,TLS/S,NLA/S,DUMP/K"
-enum { A_HOST, A_PORT, A_USER, A_DOMAIN, A_PASSWORD, A_RDP, A_TLS, A_NLA, A_DUMP, A_N };
+#define TEMPLATE "HOST/A,PORT/N,USER/K,DOMAIN/K,PASSWORD/K,RDP/S,TLS/S,NLA/S,DUMP/K,ASKPASS/S,ACTIVATE/S,WAIT/N"
+enum { A_HOST, A_PORT, A_USER, A_DOMAIN, A_PASSWORD, A_RDP, A_TLS, A_NLA, A_DUMP, A_ASKPASS, A_ACTIVATE, A_WAIT, A_N };
+
+static char pw[256];
+
+static void wipe(volatile char* p, size_t n)
+{
+	while (n--)
+		*p++ = 0;
+}
+
+/* the password from the console with nothing echoed: raw mode, a key at a time */
+static int ask_password(void)
+{
+	BPTR in = Input(), out = Output();
+	size_t n = 0;
+	char ch;
+	if (!IsInteractive(in))
+		return 0;
+	FPuts(out, (CONST_STRPTR) "Password: ");
+	Flush(out);
+	SetMode(in, 1);
+	while (Read(in, &ch, 1) == 1)
+	{
+		if (ch == '\r' || ch == '\n')
+			break;
+		if (ch == 8 || ch == 127)
+		{
+			if (n) n--;
+			continue;
+		}
+		if (ch == 3 || ch == 27)
+		{
+			n = 0;
+			break;
+		}
+		if ((unsigned char)ch >= 32 && n + 1 < sizeof(pw))
+			pw[n++] = ch;
+	}
+	SetMode(in, 0);
+	pw[n] = 0;
+	ch = 0;
+	FPuts(out, (CONST_STRPTR) "\n");
+	return n > 0;
+}
+
+static void print_conn(int rc, const struct rdp_conn* c)
+{
+	const char* ei = rdp_error_info_text(c->error_info);
+	int i;
+	if (c->demand.ncaps)
+	{
+		printf("Demand Active: shareId 0x%08lX, source %u, %u capability sets (mask 0x%08lX), desktop %u x %u at %u bpp",
+		       (unsigned long)c->demand.share_id, (unsigned)c->demand.source, (unsigned)c->demand.ncaps,
+		       (unsigned long)c->demand.cap_mask, (unsigned)c->demand.width, (unsigned)c->demand.height,
+		       (unsigned)c->demand.bpp);
+		if (c->demand.session_id)
+			printf(", sessionId %lu", (unsigned long)c->demand.session_id);
+		printf(".\n");
+	}
+	printf("Session: %s; %lu PDUs, %lu slow-path updates, fast-path %lu PDUs / %lu updates / %lu bytes.\n",
+	       rdp_act_name(c->act), (unsigned long)c->pdus, (unsigned long)c->slow_updates,
+	       (unsigned long)c->fp.pdus, (unsigned long)c->fp.updates, (unsigned long)c->fp.bytes);
+	if (c->fp.updates)
+	{
+		printf("Fast-path updateCodes:");
+		for (i = 0; i < 16; i++)
+			if (c->fp.by_code[i])
+				printf(" %d:%lu", i, (unsigned long)c->fp.by_code[i]);
+		printf("\n");
+	}
+	if (c->other_types)
+		printf("Slow-path data pduType2 seen: mask 0x%08lX.\n", (unsigned long)c->other_types);
+	if (c->error_info)
+		printf("Set Error Info: 0x%08lX%s%s.\n", (unsigned long)c->error_info, ei ? " " : "", ei ? ei : "");
+	if (c->deactivated_early)
+		printf("Deactivate All before any Demand Active: the server dropped the session after licensing\n"
+		       "  (MS-RDPBCGR 1.3.1.3). Its own log says why; a server that requires the Graphics\n"
+		       "  Pipeline (RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL), 32 bpp or drdynvc ends it here.\n");
+	if (c->redirected)
+		printf("Server Redirection PDU: the server asked for a reconnection elsewhere (not followed yet).\n");
+	if (c->mr.disconnect_reason)
+		printf("MCS: Disconnect Provider Ultimatum, reason %u.\n", c->mr.disconnect_reason - 1);
+	if (rc < 0)
+		printf("Session stopped: %s\n", rdp_error_text(rc));
+	{
+		unsigned k, first = c->ntrace > 8 ? c->ntrace - 8 : 0;
+		for (k = first; k < c->ntrace; k++)
+		{
+			unsigned i = k % 8, j;
+			printf("  PDU %u: %s choice %u channel %u len %u:", k + 1, c->trace[i].fastpath ? "fast-path" : "MCS",
+			       (unsigned)c->trace[i].choice, (unsigned)c->trace[i].channel, (unsigned)c->trace[i].len);
+			for (j = 0; j < 24; j++)
+				printf(" %02X", c->trace[i].head[j]);
+			printf("\n");
+		}
+	}
+}
 
 /* "YYMMDDhhmmssZ" (UTCTime, RFC 5280: YY < 50 is 20YY) or "YYYYMMDDhhmmssZ"
  * (GeneralizedTime) as "YYYY-MM-DD hh:mm:ss UTC"; anything else as it is */
@@ -116,6 +218,7 @@ static void print_nla(int rc, const struct rdp_nla_result* r)
 		       (unsigned)((r->ntlm_peer_version >> 8) & 0xff), (unsigned)(r->ntlm_peer_version >> 16));
 	if (r->peer_version)
 		printf("CredSSP: version %lu (the server's %lu)\n", (unsigned long)r->version, (unsigned long)r->peer_version);
+	printf("NTLM channel bindings: %s\n", r->bound ? "tls-server-end-point" : "none (gfopenntlm.library 1.0, or no certificate hash)");
 	if (rc == 0)
 	{
 		printf("NLA: the server accepted the credentials.\n");
@@ -157,7 +260,8 @@ int main(void)
 	LONG args[A_N] = { 0 };
 	struct RDArgs* rd;
 	struct rdp_settings s;
-	struct rdp_transport t;
+	static struct rdp_conn conn;   /* its transport is the one connection: TLS keeps a pointer to it */
+	struct rdp_transport* t = &conn.t;
 	struct rdp_x224_cc cc;
 	int rc;
 
@@ -182,17 +286,22 @@ int main(void)
 	s.domain = (const char*)args[A_DOMAIN];
 	s.nla_dump = (const char*)args[A_DUMP];
 	if (args[A_RDP] || args[A_TLS] || args[A_NLA])
-		s.protocols = (args[A_TLS] ? RDP_PROTOCOL_SSL : 0) | (args[A_NLA] ? RDP_PROTOCOL_HYBRID : 0);
+		s.protocols = (args[A_TLS] ? RDP_PROTOCOL_SSL : 0) |
+		              (args[A_NLA] ? RDP_PROTOCOL_HYBRID | RDP_PROTOCOL_HYBRID_EX : 0);
+	if (args[A_PASSWORD])
+		snprintf(pw, sizeof(pw), "%s", (const char*)args[A_PASSWORD]);
+	else if (args[A_ASKPASS])
+		ask_password();
 
-	rdp_transport_init(&t);
+	rdp_conn_init(&conn);
 	printf("Connecting to %s, port %u...\n", s.host, (unsigned)s.port);
-	rc = rdp_transport_connect(&t, s.host, s.port, s.timeout_us);
+	rc = rdp_transport_connect(t, s.host, s.port, s.timeout_us);
 	if (rc == 0)
 	{
 		printf("Connected. Asking for %s%s%s.\n", s.protocols & RDP_PROTOCOL_SSL ? "TLS" : "",
 		       (s.protocols & (RDP_PROTOCOL_SSL | RDP_PROTOCOL_HYBRID)) == (RDP_PROTOCOL_SSL | RDP_PROTOCOL_HYBRID) ? " or " : "",
 		       s.protocols & RDP_PROTOCOL_HYBRID ? "NLA" : (s.protocols ? "" : "standard RDP security"));
-		rc = rdp_negotiate(&t, &s, &cc);
+		rc = rdp_negotiate(t, &s, &cc);
 	}
 	if (rc == 0)
 	{
@@ -205,16 +314,16 @@ int main(void)
 			       cc.has_neg ? "" : ", with no negotiation data: an old server");
 			if (cc.selected & (RDP_PROTOCOL_SSL | RDP_PROTOCOL_HYBRID | RDP_PROTOCOL_HYBRID_EX))
 			{
-				rc = rdp_transport_start_tls(&t);
+				rc = rdp_transport_start_tls(t);
 				if (rc == 0)
 				{
 					const uint8_t* der;
 					size_t len;
 					struct rdp_x509 x;
 					char name[256];
-					printf("TLS: %s, %s.\n", amipr_tls_protocol(t.tls) == 0x0304 ? "TLS 1.3" : "TLS 1.2",
-					       amipr_tls_cipher(t.tls) ? amipr_tls_cipher(t.tls) : "?");
-					if (amipr_tls_peer_certificate(t.tls, &der, &len) == 0 && rdp_x509_parse(&x, der, len) == 0 &&
+					printf("TLS: %s, %s.\n", amipr_tls_protocol(t->tls) == 0x0304 ? "TLS 1.3" : "TLS 1.2",
+					       amipr_tls_cipher(t->tls) ? amipr_tls_cipher(t->tls) : "?");
+					if (amipr_tls_peer_certificate(t->tls, &der, &len) == 0 && rdp_x509_parse(&x, der, len) == 0 &&
 					    rdp_x509_name_string(x.subject, x.subject_len, name, sizeof(name)) == 0)
 					{
 						uint8_t fp[32];
@@ -233,19 +342,51 @@ int main(void)
 						for (i = 0; i < 32; i++)
 							printf("%s%02X", i ? ":" : " ", fp[i]);
 						printf("\n");
-						if ((cc.selected & (RDP_PROTOCOL_HYBRID | RDP_PROTOCOL_HYBRID_EX)) && args[A_PASSWORD])
+						if ((cc.selected & (RDP_PROTOCOL_HYBRID | RDP_PROTOCOL_HYBRID_EX)) && pw[0])
 						{
 							struct rdp_nla_result nr;
+							uint8_t cb[64];  /* tls-server-end-point, up to SHA-512 */
+							int cbl = rdp_x509_channel_binding(&x, cb, sizeof(cb), NULL);
 							printf("NLA: logging on as %s%s%s (CredSSP over NTLMv2)...\n", s.domain ? s.domain : "",
 							       s.domain ? "\\" : "", s.user ? s.user : "");
-							rc = rdp_nla(&t, &s, (const char*)args[A_PASSWORD], x.pubkey, x.pubkey_len,
+							rc = rdp_nla(t, &s, pw, x.pubkey, x.pubkey_len, cbl > 0 ? cb : NULL, cbl > 0 ? (size_t)cbl : 0,
 							             (cc.selected & RDP_PROTOCOL_HYBRID_EX) != 0, &nr);
 							print_nla(rc, &nr);
 							if (rc == 0)
 							{
 								struct rdp_mcs_result mr;
-								rc = rdp_mcs_connect(&t, &s, cc.selected, (const char*)args[A_PASSWORD], &mr);
+								s.width = 1024;
+								s.height = 768;
+								s.depth = 16;
+								rc = rdp_mcs_connect(t, &s, cc.selected, pw, &mr);
+								wipe(pw, sizeof(pw));
 								print_mcs(rc, &mr);
+								if (rc == 0 && args[A_ACTIVATE])
+								{
+									int secs = args[A_WAIT] ? (int)*(LONG*)args[A_WAIT] : 5, k;
+									conn.mr = mr;
+									conn.selected = cc.selected;
+									conn.width = s.width;
+									conn.height = s.height;
+									conn.depth = s.depth;
+									conn.live = 1;
+									printf("Session: Confirm Active and the finalization...\n");
+									rc = rdp_conn_activate(&conn, 64);
+									print_conn(rc, &conn);
+									for (k = 0; rc >= 0 && k < secs * 10; k++)
+									{
+										Delay(5);
+										rc = rdp_conn_poll(&conn, 64);
+									}
+									if (secs > 0)
+									{
+										printf("After %d s more:\n", secs);
+										print_conn(rc, &conn);
+									}
+									rdp_conn_close(&conn);
+									printf("Disconnected%s.\n", conn.act == RDP_ACT_ENDED ? " (by the computer)" : "");
+									rc = rc < 0 ? 1 : 0;
+								}
 							}
 							if (rc != 0)
 								rc = 1;  /* said already */
@@ -255,13 +396,14 @@ int main(void)
 					}
 				}
 				else
-					printf("TLS failed: %s\n", t.tls ? amipr_tls_error_text(t.tls) : rdp_error_text(rc));
+					printf("TLS failed: %s\n", t->tls ? amipr_tls_error_text(t->tls) : rdp_error_text(rc));
 			}
 		}
 	}
 	if (rc < 0)
 		printf("RDPProbe: %s\n", rdp_error_text(rc));
-	rdp_transport_close(&t);
+	wipe(pw, sizeof(pw));
+	rdp_transport_close(t);
 	amipr_net_close();
 	FreeArgs(rd);
 	return rc ? RETURN_WARN : RETURN_OK;

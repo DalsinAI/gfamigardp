@@ -91,7 +91,7 @@ LOG="$OUT/warnings.log"
 OBJS=""
 for f in src/amiga/amipr_init.c src/amiga/amipr_time.c src/amiga/amipr_atomic.c src/amiga/amipr_wait.c \
          src/amiga/amipr_dos.c src/amiga/amipr_net.c src/amiga/amipr_crypto.c src/amiga/amipr_tls.c \
-         src/crypto/x509.c src/core/x224.c src/core/transport.c src/core/connect.c src/core/nla.c src/core/mcs.c; do
+         src/crypto/x509.c src/core/x224.c src/core/transport.c src/core/connect.c src/core/nla.c src/core/mcs.c src/core/utf16.c src/core/pdu.c src/core/session.c; do
     o="$WORK/obj/$(basename "$f" .c).o"
     "$CC" $CFLAGS -c "$HERE/$f" -o "$o" 2>>"$LOG"
     OBJS="$OBJS $o"

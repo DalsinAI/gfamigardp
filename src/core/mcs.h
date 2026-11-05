@@ -16,6 +16,7 @@
 #include "connect.h"
 
 #define RDP_E_MCS (-120)     /* the server's MCS answer was a refusal; see the result */
+#define RDP_E_LICENSE (-121) /* licensing did not end with STATUS_VALID_CLIENT: lic_type, lic_error say how */
 
 #define RDP_MCS_MAX_CHANNELS 31
 
@@ -60,6 +61,29 @@ int rdp_mcs_connect(struct rdp_transport* t, const struct rdp_settings* s, uint3
                     const char* password, struct rdp_mcs_result* r);
 
 const char* rdp_mcs_stage_name(int stage);
+
+/* ---- after licensing ---- */
+
+/* one PDU the server sent: a fast-path output PDU (fastpath 1, data its
+ * updates) or an MCS Send Data Indication (channel, data its userData) */
+struct rdp_pdu
+{
+	int fastpath;
+	uint8_t choice;              /* the MCS DomainMCSPDU choice (26 SDIN), 0 for fast-path */
+	uint16_t channel;
+	const uint8_t* data;
+	size_t len;
+};
+/* Reads one PDU into buf (size 65536 holds any). 0 (pdu->len 0 for an MCS
+ * PDU the session has no use for), AMIPR_ECLOSED after a Disconnect
+ * Provider Ultimatum (r->disconnect_reason) or when the connection ends,
+ * or < 0. */
+int rdp_pdu_read(struct rdp_transport* t, uint8_t* buf, size_t size, struct rdp_mcs_result* r, struct rdp_pdu* pdu);
+/* An MCS Send Data Request from user on channel with data (len < 32768) */
+int rdp_mcs_send_data(struct rdp_transport* t, uint8_t* buf, size_t size, uint16_t user, uint16_t channel,
+                      const uint8_t* data, size_t len);
+/* The client's Disconnect Provider Ultimatum (rn-user-requested) */
+int rdp_mcs_disconnect(struct rdp_transport* t);
 const char* rdp_license_error_text(uint32_t code);
 
 #endif

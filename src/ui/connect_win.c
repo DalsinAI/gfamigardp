@@ -12,6 +12,7 @@
 #include "nla.h"
 #include "mcs.h"
 #include "x509.h"
+#include "session.h"
 
 #include <exec/types.h>
 #include <intuition/intuition.h>
@@ -202,48 +203,49 @@ static void nla_status(struct cw* c, int rc, const struct rdp_nla_result* r)
 }
 
 /* the real connection's first steps: TCP, the X.224 negotiation, TLS,
- * and NLA's logon when the computer chose it */
+ * NLA's logon when the computer chose it, MCS and licensing. On success
+ * the connection stays open in info->conn for the session window, which
+ * then does the Capabilities Exchange on it; on failure it is closed. */
 static int probe(struct cw* c, struct session_info* info, ULONG protocols, const char* password)
 {
 	struct rdp_settings s;
-	struct rdp_transport t;
+	struct rdp_conn* conn = info->conn;
+	struct rdp_transport* t = &conn->t;
 	struct rdp_x224_cc cc;
 	char line[160];
 	int rc;
 
+	rdp_conn_close(conn);    /* a session before this one */
+	rdp_conn_init(conn);
 	rdp_settings_default(&s);
 	s.host = info->host;
 	s.user = info->user;
 	s.domain = info->domain;
 	s.protocols = protocols;
-	rdp_transport_init(&t);
-	rc = rdp_transport_connect(&t, info->host, s.port, s.timeout_us);
+	rc = rdp_transport_connect(t, info->host, s.port, s.timeout_us);
 	if (rc == 0)
-		rc = rdp_negotiate(&t, &s, &cc);
+		rc = rdp_negotiate(t, &s, &cc);
 	if (rc == 0 && cc.has_neg && cc.neg_type == RDP_NEG_FAILURE)
 	{
 		set_status(c, rdp_negfail_text(cc.failure));
-		rdp_transport_close(&t);
-		return 0;
+		goto fail;
 	}
 	if (rc == 0 && cc.selected == RDP_PROTOCOL_RDP)
 	{
 		set_status(c, "The computer offers only standard RDP security, which this version does not do.");
-		rdp_transport_close(&t);
-		return 0;
+		goto fail;
 	}
 	if (rc == 0)
 	{
 		set_status(c, "Making a secure connection...");
 		olui_amiga_draw(c->a);
-		rc = rdp_transport_start_tls(&t);
+		rc = rdp_transport_start_tls(t);
 	}
 	if (rc != 0)
 	{
 		snprintf(line, sizeof(line), "%s", rdp_error_text(rc));
 		set_status(c, line);
-		rdp_transport_close(&t);
-		return 0;
+		goto fail;
 	}
 	if (cc.selected & (RDP_PROTOCOL_HYBRID | RDP_PROTOCOL_HYBRID_EX))
 	{
@@ -256,61 +258,89 @@ static int probe(struct cw* c, struct session_info* info, ULONG protocols, const
 		{
 			set_status(c, "This computer needs a user name and password first (NLA).");
 			olui_focus(c->ui, c->user);
-			rdp_transport_close(&t);
-			return 0;
+			goto fail;
 		}
-		if (amipr_tls_peer_certificate(t.tls, &der, &len) != 0 || rdp_x509_parse(&x, der, len) != 0)
+		if (amipr_tls_peer_certificate(t->tls, &der, &len) != 0 || rdp_x509_parse(&x, der, len) != 0)
 		{
 			set_status(c, "The computer's certificate could not be read.");
-			rdp_transport_close(&t);
-			return 0;
+			goto fail;
 		}
 		set_status(c, "Logging on...");
 		olui_amiga_draw(c->a);
-		rc = rdp_nla(&t, &s, password, x.pubkey, x.pubkey_len, (cc.selected & RDP_PROTOCOL_HYBRID_EX) != 0, &nr);
+		{
+			uint8_t cb[64];  /* up to SHA-512 */
+			int cbl = rdp_x509_channel_binding(&x, cb, sizeof(cb), NULL);
+			rc = rdp_nla(t, &s, password, x.pubkey, x.pubkey_len, cbl > 0 ? cb : NULL, cbl > 0 ? (size_t)cbl : 0,
+			             (cc.selected & RDP_PROTOCOL_HYBRID_EX) != 0, &nr);
+		}
 		if (rc != 0)
 		{
 			nla_status(c, rc, &nr);
-			rdp_transport_close(&t);
-			return 0;
+			goto fail;
 		}
 	}
-	/* MCS, GCC, the channels and the Client Info PDU, as far as licensing */
+	/* MCS, GCC, the channels, the Client Info PDU and licensing */
 	{
-		struct rdp_mcs_result mr;
+		struct rdp_mcs_result* mr = &conn->mr;
 		s.width = info->width;
 		s.height = info->height;
 		s.depth = (uint8_t)info->depth;
 		set_status(c, "Joining the session's channels...");
 		olui_amiga_draw(c->a);
-		rc = rdp_mcs_connect(&t, &s, cc.selected, password, &mr);
+		rc = rdp_mcs_connect(t, &s, cc.selected, password, mr);
 		if (rc != 0)
 		{
-			if (mr.disconnect_reason)
+			if (mr->disconnect_reason)
 				snprintf(line, sizeof(line), "The computer ended the connection after %s (reason %u).",
-				         rdp_mcs_stage_name(mr.stage), mr.disconnect_reason - 1);
-			else if (mr.error_info)
+				         rdp_mcs_stage_name(mr->stage), mr->disconnect_reason - 1);
+			else if (mr->error_info)
 				snprintf(line, sizeof(line), "The computer ended the connection after %s (error 0x%08lX).",
-				         rdp_mcs_stage_name(mr.stage), (unsigned long)mr.error_info);
+				         rdp_mcs_stage_name(mr->stage), (unsigned long)mr->error_info);
+			else if (rc == RDP_E_LICENSE && mr->lic_type == 0xFF)
+				snprintf(line, sizeof(line), "Licensing failed: %s.", rdp_license_error_text(mr->lic_error));
 			else
-				snprintf(line, sizeof(line), "Stopped after %s: %s", rdp_mcs_stage_name(mr.stage), rdp_error_text(rc));
+				snprintf(line, sizeof(line), "Stopped after %s: %s", rdp_mcs_stage_name(mr->stage), rdp_error_text(rc));
 			set_status(c, line);
-			rdp_transport_close(&t);
-			return 0;
+			goto fail;
 		}
-		snprintf(info->security, sizeof(info->security), "%s, %s %s; reached licensing: %s",
-		         cc.selected == RDP_PROTOCOL_SSL ? "TLS" : "NLA",
-		         amipr_tls_protocol(t.tls) == 0x0304 ? "TLS 1.3" : "TLS 1.2",
-		         amipr_tls_cipher(t.tls) ? amipr_tls_cipher(t.tls) : "",
-		         mr.lic_type == 0xFF ? rdp_license_error_text(mr.lic_error) : "licence exchange");
+		snprintf(info->security, sizeof(info->security), "%s, %s %s",
+		         cc.selected == RDP_PROTOCOL_SSL ? "TLS" : (cc.selected & RDP_PROTOCOL_HYBRID_EX) ? "NLA (EX)" : "NLA",
+		         amipr_tls_protocol(t->tls) == 0x0304 ? "TLS 1.3" : "TLS 1.2",
+		         amipr_tls_cipher(t->tls) ? amipr_tls_cipher(t->tls) : "");
 	}
-	rdp_transport_close(&t);
+	conn->live = 1;
+	conn->selected = cc.selected;
+	conn->width = info->width;
+	conn->height = info->height;
+	conn->depth = info->depth;
 	return 1;
+fail:
+	rdp_conn_close(conn);
+	return 0;
+}
+
+/* the password field's text into the caller's buffer, and the field's
+ * own copy overwritten and emptied: the password then lives only in pw
+ * for the logon, and the caller wipes pw after it (review M4) */
+static void take_password(struct cw* c, char* pw, size_t size)
+{
+	char* text = (char*)olui_get_text(c->password);   /* the field's own heap copy */
+	copy_text(pw, size, text);
+	if (text[0])
+		memset(text, 0, strlen(text));
+	olui_set_text(c->ui, c->password, "");
+}
+
+static void wipe(volatile char* p, size_t n)
+{
+	while (n--)
+		*p++ = 0;
 }
 
 static void do_connect(struct cw* c)
 {
 	struct session_info* info = c->info;
+	struct rdp_conn* conn = info->conn;
 	const char* host = olui_get_text(c->host);
 	int r, d;
 	char line[320];
@@ -322,6 +352,7 @@ static void do_connect(struct cw* c)
 		return;
 	}
 	memset(info, 0, sizeof(*info));
+	info->conn = conn;
 	copy_text(info->host, sizeof(info->host), host);
 	copy_text(info->user, sizeof(info->user), olui_get_text(c->user));
 	copy_text(info->domain, sizeof(info->domain), olui_get_text(c->domain));
@@ -339,14 +370,22 @@ static void do_connect(struct cw* c)
 		c->result = 1;
 		return;
 	}
+	if (!conn)
+	{
+		set_status(c, "Out of memory.");
+		return;
+	}
 	snprintf(line, sizeof(line), "Connecting to %s...", info->host);
 	set_status(c, line);
-	olui_amiga_draw(c->a);
 	{
+		char pw[256];
 		int s = olui_select_index(c->sec);
+		take_password(c, pw, sizeof(pw));
+		olui_amiga_draw(c->a);
 		if (s < 0 || s >= ui_nsecurity) s = 0;
-		if (probe(c, info, ui_security[s].protocols, olui_get_text(c->password)))
+		if (probe(c, info, ui_security[s].protocols, pw))
 			c->result = 1;
+		wipe(pw, sizeof(pw));
 	}
 }
 

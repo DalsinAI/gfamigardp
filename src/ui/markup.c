@@ -24,9 +24,9 @@ const struct ui_depth ui_depths[] = {
 };
 /* RDP_PROTOCOL_SSL 1, RDP_PROTOCOL_HYBRID 2 (core/x224.h) */
 const struct ui_security ui_security[] = {
-	{ "The best the computer offers", 0x3 },
+	{ "The best the computer offers", 0x1 | 0x2 | 0x8 },   /* TLS, HYBRID, HYBRID_EX */
 	{ "TLS", 0x1 },
-	{ "Network Level Authentication", 0x2 },
+	{ "Network Level Authentication", 0x2 | 0x8 },         /* HYBRID, HYBRID_EX */
 };
 const int ui_nresolutions = sizeof(ui_resolutions) / sizeof(ui_resolutions[0]);
 const int ui_ndepths = sizeof(ui_depths) / sizeof(ui_depths[0]);

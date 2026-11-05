@@ -80,6 +80,13 @@ typedef int (*rdp_prog_ycbcr_fn)(void* user, uint32_t* px, uint16_t w, uint16_t 
                                  int tile_x, int tile_y, int x0, int y0, int x1, int y1);
 void rdp_progressive_set_ycbcr(rdp_prog_ycbcr_fn fn, void* user);
 
+/* Optional inverse DWT after dequant (OpenGPU DWT_INV). Return 1 if the hook
+ * wrote the 64x64 spatial component into buf; 0 to use rdp_prog_idwt. tmp is
+ * the same scratch the CPU path uses (RDP_PROG_TMP ints). */
+typedef int (*rdp_prog_idwt_fn)(void* user, int32_t* buf, int re, int32_t* tmp);
+void rdp_progressive_set_idwt(rdp_prog_idwt_fn fn, void* user);
+
+
 /* Free coef/sign for tiles completely outside keep_*; painted tiles keep their
  * pixels in the surface. Safe under memory pressure / far pans (O1b). */
 int rdp_progressive_trim(struct rdp_prog_surface* ps, const struct rdp_mem* mem,

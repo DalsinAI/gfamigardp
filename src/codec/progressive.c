@@ -9,11 +9,19 @@
 
 static rdp_prog_ycbcr_fn s_ycbcr_fn;
 static void* s_ycbcr_user;
+static rdp_prog_idwt_fn s_idwt_fn;
+static void* s_idwt_user;
 
 void rdp_progressive_set_ycbcr(rdp_prog_ycbcr_fn fn, void* user)
 {
 	s_ycbcr_fn = fn;
 	s_ycbcr_user = user;
+}
+
+void rdp_progressive_set_idwt(rdp_prog_idwt_fn fn, void* user)
+{
+	s_idwt_fn = fn;
+	s_idwt_user = user;
 }
 
 
@@ -517,7 +525,8 @@ static void render(struct ctx* c, struct rdp_prog_tile* t, uint16_t xi, uint16_t
 					w[i] = (int32_t)co[i] >> rs;
 			}
 		}
-		rdp_prog_idwt(w, t->re, c->tmp);
+		if (!(s_idwt_fn && s_idwt_fn(s_idwt_user, w, t->re, c->tmp)))
+			rdp_prog_idwt(w, t->re, c->tmp);
 	}
 	for (r = 0; r < c->nrects; r++)
 	{

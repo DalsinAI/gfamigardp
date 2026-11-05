@@ -23,6 +23,9 @@ void rdp_settings_default(struct rdp_settings* s)
 	s->height = 600;
 	s->depth = 16;
 	s->timeout_us = 15000000;
+	s->keyboard_layout = amipr_keyboard_layout();
+	s->timezone_bias = -amipr_utc_offset_minutes();
+	s->timezone_bias_set = 1;
 }
 
 int rdp_negotiate(struct rdp_transport* t, const struct rdp_settings* s, struct rdp_x224_cc* cc)

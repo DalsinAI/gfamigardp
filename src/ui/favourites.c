@@ -6,6 +6,7 @@
  * MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #include "ui.h"
+#include "utf16.h"
 
 #include <dos/dos.h>
 #include <proto/exec.h>
@@ -20,10 +21,13 @@
 
 static void copy_field(char* dst, size_t size, const char* src, size_t len)
 {
-	if (len >= size)
-		len = size - 1;
-	memcpy(dst, src, len);
-	dst[len] = 0;
+	char tmp[512];
+	if (len >= sizeof(tmp))
+		len = sizeof(tmp) - 1;
+	memcpy(tmp, src, len);
+	tmp[len] = 0;
+	/* a hand-edited Favourites file is Latin-1; one the GUI wrote is UTF-8 (review L1) */
+	rdp_amiga_to_utf8(dst, size, tmp);
 }
 
 static int clamp_index(const char* s, int n)

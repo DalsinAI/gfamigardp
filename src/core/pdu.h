@@ -75,7 +75,7 @@ int rdp_demand_parse(const uint8_t* p, size_t len, struct rdp_demand* d);
 /* Confirm Active (2.2.1.13.2) into s: the client's capability sets for a
  * desktop of w x h at bpp, user the MCS user channel. Its length, or < 0 */
 int rdp_build_confirm_active(struct rdp_stream* s, const struct rdp_demand* d, uint16_t user,
-                             uint16_t w, uint16_t h, uint16_t bpp);
+                             uint16_t w, uint16_t h, uint16_t bpp, uint32_t keyboard_layout);
 /* A data PDU (2.2.8.1.1.1.2) around payload: Synchronize, Control, Font List */
 int rdp_build_data(struct rdp_stream* s, uint32_t share_id, uint16_t user, uint8_t type2,
                    const uint8_t* payload, size_t len);

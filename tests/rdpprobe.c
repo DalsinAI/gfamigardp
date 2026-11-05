@@ -12,7 +12,10 @@
  * Capabilities Exchange and finalization (session.c), then WAIT seconds
  * (default 5) of what the computer sends, counted; then a disconnect.
  * DUMP=file: the NLA exchange in hex, up to the AUTHENTICATE and the
- * server's answer (never the credentials), to check a logon offline.
+ * server's answer (never the sealed credentials). The CHALLENGE and
+ * AUTHENTICATE together are an NTLMv2 response that can be cracked
+ * offline: treat a DUMP file like a password hash, do not share it
+ * (review L4).
  * To find what a server wants of the client data (TS_UD_CS_CORE, CS_NET):
  * CHANNELS=drdynvc,cliprdr the static channels offered (default none),
  * EARLY=hex earlyCapabilityFlags (default 0001), DEPTHS=hex
@@ -30,6 +33,7 @@
 #include "mcs.h"
 #include "session.h"
 #include "knownhosts.h"
+#include "utf16.h"
 
 #include <dos/dos.h>
 #include <proto/exec.h>
@@ -47,7 +51,9 @@ unsigned long __stack = 65536;
 #define TEMPLATE "HOST/A,PORT/N,USER/K,DOMAIN/K,PASSWORD/K,RDP/S,TLS/S,NLA/S,DUMP/K,ASKPASS/S,ACTIVATE/S,WAIT/N,CHANNELS/K,EARLY/K,DEPTHS/K,BPP/N,TRUST/S"
 enum { A_HOST, A_PORT, A_USER, A_DOMAIN, A_PASSWORD, A_RDP, A_TLS, A_NLA, A_DUMP, A_ASKPASS, A_ACTIVATE, A_WAIT, A_CHANNELS, A_EARLY, A_DEPTHS, A_BPP, A_TRUST, A_N };
 
-static char pw[256];
+static char pw[512];
+static char user_utf8[256];
+static char domain_utf8[256];
 
 static void wipe(volatile char* p, size_t n)
 {
@@ -298,9 +304,17 @@ int main(void)
 	s.host = (const char*)args[A_HOST];
 	if (args[A_PORT])
 		s.port = (uint16_t) * (LONG*)args[A_PORT];
-	s.user = (const char*)args[A_USER];
-	s.domain = (const char*)args[A_DOMAIN];
+	/* Shell / console text is Latin-1; NLA and Client Info want UTF-8 (review L1) */
+	if (args[A_USER])
+		rdp_amiga_to_utf8(user_utf8, sizeof(user_utf8), (const char*)args[A_USER]);
+	if (args[A_DOMAIN])
+		rdp_amiga_to_utf8(domain_utf8, sizeof(domain_utf8), (const char*)args[A_DOMAIN]);
+	s.user = args[A_USER] ? user_utf8 : NULL;
+	s.domain = args[A_DOMAIN] ? domain_utf8 : NULL;
 	s.nla_dump = (const char*)args[A_DUMP];
+	if (args[A_DUMP])
+		printf("DUMP: the file will hold an NTLMv2 response (CHALLENGE + AUTHENTICATE)\n"
+		       "      that can be cracked offline. Do not share it.\n");
 	if (args[A_RDP] || args[A_TLS] || args[A_NLA])
 		s.protocols = (args[A_TLS] ? RDP_PROTOCOL_SSL : 0) |
 		              (args[A_NLA] ? RDP_PROTOCOL_HYBRID | RDP_PROTOCOL_HYBRID_EX : 0);
@@ -310,12 +324,23 @@ int main(void)
 	if (args[A_DEPTHS])
 		s.color_depths = (uint16_t)strtoul((const char*)args[A_DEPTHS], NULL, 16);
 	if (args[A_PASSWORD])
-		snprintf(pw, sizeof(pw), "%s", (const char*)args[A_PASSWORD]);
-	else if (args[A_ASKPASS])
-		ask_password();
+	{
+		char raw[256];
+		snprintf(raw, sizeof(raw), "%s", (const char*)args[A_PASSWORD]);
+		rdp_amiga_to_utf8(pw, sizeof(pw), raw);
+		wipe(raw, sizeof(raw));
+	}
+	else if (args[A_ASKPASS] && ask_password())
+	{
+		char raw[512];
+		memcpy(raw, pw, sizeof(raw));
+		rdp_amiga_to_utf8(pw, sizeof(pw), raw);
+		wipe(raw, sizeof(raw));
+	}
 
 again:
 	rdp_conn_init(&conn);
+	conn.keyboard_layout = s.keyboard_layout;
 	printf("Connecting to %s, port %u...\n", s.host, (unsigned)s.port);
 	rc = rdp_transport_connect(t, s.host, s.port, s.timeout_us);
 	if (rc == 0)

@@ -14,6 +14,7 @@
 #include "x509.h"
 #include "session.h"
 #include "knownhosts.h"
+#include "utf16.h"
 
 #include <exec/types.h>
 #include <intuition/intuition.h>
@@ -115,8 +116,8 @@ static void show_fav(struct cw* c, int i)
 
 static void copy_text(char* dst, size_t size, const char* src)
 {
-	strncpy(dst, src ? src : "", size - 1);
-	dst[size - 1] = 0;
+	/* whole UTF-8 characters only: a cut mid-sequence fails logon (review L2) */
+	rdp_copy_utf8(dst, size, src);
 }
 
 static void do_save(struct cw* c)
@@ -315,6 +316,14 @@ again:
 		set_status(c, "The computer offers only standard RDP security, which this version does not do.");
 		goto fail;
 	}
+	/* only a protocol we offered (review L8); rdp_negotiate already returns
+	 * RDP_E_DOWNGRADE, but a zero selected with has_neg still needs a word */
+	if (rc == 0 && cc.has_neg && cc.neg_type == RDP_NEG_RSP &&
+	    !(cc.selected & (RDP_PROTOCOL_SSL | RDP_PROTOCOL_HYBRID | RDP_PROTOCOL_HYBRID_EX)))
+	{
+		set_status(c, "The computer chose a security protocol this version does not use.");
+		goto fail;
+	}
 	if (rc == 0)
 	{
 		set_status(c, "Making a secure connection...");
@@ -408,6 +417,7 @@ again:
 	conn->width = info->width;
 	conn->height = info->height;
 	conn->depth = info->depth;
+	conn->keyboard_layout = s.keyboard_layout;
 	return 1;
 fail:
 	rdp_conn_close(conn);
@@ -527,7 +537,7 @@ static void do_connect(struct cw* c)
 	snprintf(line, sizeof(line), "Connecting to %s...", info->host);
 	set_status(c, line);
 	{
-		char pw[256];
+		char pw[512];
 		int s = olui_select_index(c->sec);
 		take_password(c, pw, sizeof(pw));
 		olui_amiga_draw(c->a);

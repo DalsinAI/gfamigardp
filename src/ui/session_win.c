@@ -193,7 +193,7 @@ int session_window(struct app* app, const struct session_info* info)
 	struct sw s;
 	struct Menu* menu;
 	UWORD fh = app->screen->Font ? app->screen->Font->ta_YSize : 8;
-	char title[300], line[400];
+	char title[320], line[520];
 	int ok;
 
 	memset(&s, 0, sizeof(s));

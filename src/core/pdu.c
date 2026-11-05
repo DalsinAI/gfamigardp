@@ -56,7 +56,7 @@ static void cap_end(struct rdp_stream* s, size_t at)
 	}
 }
 
-static void caps(struct rdp_stream* s, uint16_t w, uint16_t h, uint16_t bpp)
+static void caps(struct rdp_stream* s, uint16_t w, uint16_t h, uint16_t bpp, uint32_t keyboard_layout)
 {
 	size_t at;
 
@@ -130,7 +130,7 @@ static void caps(struct rdp_stream* s, uint16_t w, uint16_t h, uint16_t bpp)
 	at = cap_begin(s, CAPSET_INPUT);
 	rdp_s_u16le(s, 0x0001 | 0x0004 | 0x0010 | 0x0020);  /* SCANCODES, MOUSEX, UNICODE, FASTPATH_INPUT2 */
 	rdp_s_u16le(s, 0);              /* pad2octetsA */
-	rdp_s_u32le(s, 0x00000409);     /* keyboardLayout: US */
+	rdp_s_u32le(s, keyboard_layout ? keyboard_layout : 0x00000409); /* locale (review L7) */
 	rdp_s_u32le(s, 4);              /* keyboardType: IBM enhanced */
 	rdp_s_u32le(s, 0);              /* keyboardSubType */
 	rdp_s_u32le(s, 12);             /* keyboardFunctionKey */
@@ -196,7 +196,7 @@ static void caps(struct rdp_stream* s, uint16_t w, uint16_t h, uint16_t bpp)
 }
 
 int rdp_build_confirm_active(struct rdp_stream* s, const struct rdp_demand* d, uint16_t user,
-                             uint16_t w, uint16_t h, uint16_t bpp)
+                             uint16_t w, uint16_t h, uint16_t bpp, uint32_t keyboard_layout)
 {
 	static const char src[] = "MSTSC";   /* sourceDescriptor, as 4.1.13 has it */
 	size_t start = s->pos, lencombined_at, caps_at;
@@ -212,7 +212,7 @@ int rdp_build_confirm_active(struct rdp_stream* s, const struct rdp_demand* d, u
 	caps_at = s->pos;
 	rdp_s_u16le(s, (uint16_t)rdp_client_ncaps);
 	rdp_s_u16le(s, 0);                   /* pad2Octets */
-	caps(s, w, h, bpp);
+	caps(s, w, h, bpp, keyboard_layout);
 	if (s->err)
 		return -1;
 	{
@@ -348,14 +348,19 @@ int rdp_fastpath_count(const uint8_t* p, size_t len, struct rdp_fp_counts* c)
 	size_t at = 0;
 	c->pdus++;
 	c->bytes += (uint32_t)len;
-	while (at + 3 <= len)
+	while (at < len)
 	{
 		uint8_t hdr = p[at];
-		size_t size = (size_t)p[at + 1 + ((hdr >> 6) & 2 ? 1 : 0)] |
-		              ((size_t)p[at + 2 + ((hdr >> 6) & 2 ? 1 : 0)] << 8);
-		size_t head = 3 + ((hdr >> 6) & 2 ? 1 : 0);   /* fragmentation and compression: 2 bits each */
-		/* updateHeader: updateCode 4 bits, fragmentation 2, compression 2;
-		 * compressionFlags (1 byte) only when compression is FASTPATH_OUTPUT_COMPRESSION_USED */
+		/* updateHeader: updateCode 4, fragmentation 2, compression 2;
+		 * compressionFlags only when compression is FASTPATH_OUTPUT_COMPRESSION_USED (2) */
+		int comp = ((hdr >> 6) & 3) == 2;
+		size_t head = 1 + (comp ? 1 : 0) + 2; /* header, optional flags, size */
+		size_t size;
+		if (at + head > len)                 /* size bytes must both fit (review L9) */
+			return RDP_E_PROTO_PDU;
+		size = (size_t)p[at + head - 2] | ((size_t)p[at + head - 1] << 8);
+		if (at + head + size > len)
+			return RDP_E_PROTO_PDU;
 		c->updates++;
 		c->by_code[hdr & 15]++;
 		at += head + size;

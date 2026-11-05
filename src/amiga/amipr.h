@@ -47,6 +47,9 @@ uint64_t amipr_monotonic_us(void);    /* E-clock based, never goes back */
 int64_t amipr_unix_time_us(void);     /* UTC, from the system clock and the locale offset */
 int amipr_utc_offset_minutes(void);   /* local = UTC + offset (east positive) */
 const char* amipr_timezone_name(void); /* the locale's country code, e.g. "deu", or "" */
+/* Windows keyboard layout id (KLID) from the locale's country, e.g. 0x0809 for
+ * the UK; 0x0409 (US) when locale.library is missing or the country is unknown */
+uint32_t amipr_keyboard_layout(void);
 void amipr_sleep_us(uint64_t us);     /* TR_ADDREQUEST on UNIT_MICROHZ; 0 just yields */
 void amipr_yield(void);
 

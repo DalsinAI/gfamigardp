@@ -20,8 +20,8 @@ struct favourite
 {
 	char name[64];
 	char host[256];
-	char user[64];
-	char domain[64];
+	char user[256];
+	char domain[256];
 	int res;      /* index into ui_resolutions */
 	int depth;    /* index into ui_depths */
 	int security; /* index into ui_security */
@@ -34,8 +34,8 @@ struct favourite
 struct session_info
 {
 	char host[256];
-	char user[64];
-	char domain[64];
+	char user[256];
+	char domain[256];
 	UWORD width, height;
 	UBYTE depth;
 	char security[128];  /* the negotiated protocol, the TLS cipher and how far it got, in words */

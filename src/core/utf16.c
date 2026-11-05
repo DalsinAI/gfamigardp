@@ -4,6 +4,8 @@
  */
 #include "utf16.h"
 
+#include <string.h>
+
 uint32_t rdp_utf8_next(const uint8_t** pp)
 {
 	const uint8_t* p = *pp;
@@ -70,3 +72,92 @@ size_t rdp_utf16_put(const char* s, uint8_t* out, size_t size)
 	}
 	return n;
 }
+
+int rdp_utf8_ok(const char* s)
+{
+	const uint8_t* p = (const uint8_t*)(s ? s : "");
+	while (*p)
+	{
+		const uint8_t* start = p;
+		uint32_t c = *p++;
+		int extra = 0, minv = 0;
+		if (c < 0x80)
+			continue;
+		if (c < 0xc2 || c >= 0xf5)
+			return 0;
+		if (c < 0xe0) { extra = 1; minv = 0x80; c &= 0x1f; }
+		else if (c < 0xf0) { extra = 2; minv = 0x800; c &= 0x0f; }
+		else { extra = 3; minv = 0x10000; c &= 0x07; }
+		while (extra--)
+		{
+			if ((*p & 0xc0) != 0x80)
+				return 0;
+			c = (c << 6) | (*p++ & 0x3f);
+		}
+		if (c < (uint32_t)minv || (c >= 0xd800 && c <= 0xdfff) || c > 0x10ffff)
+			return 0;
+		(void)start;
+	}
+	return 1;
+}
+
+size_t rdp_latin1_to_utf8(char* dst, size_t size, const char* src)
+{
+	const uint8_t* p = (const uint8_t*)(src ? src : "");
+	size_t n = 0;
+	if (!dst || size == 0)
+		return 0;
+	while (*p)
+	{
+		uint8_t c = *p++;
+		if (c < 0x80)
+		{
+			if (n + 1 >= size)
+				break;
+			dst[n++] = (char)c;
+		}
+		else
+		{
+			if (n + 2 >= size)
+				break;
+			dst[n++] = (char)(0xc0 | (c >> 6));
+			dst[n++] = (char)(0x80 | (c & 0x3f));
+		}
+	}
+	dst[n] = '\0';
+	return n;
+}
+
+size_t rdp_amiga_to_utf8(char* dst, size_t size, const char* src)
+{
+	if (!dst || size == 0)
+		return 0;
+	if (rdp_utf8_ok(src))
+	{
+		rdp_copy_utf8(dst, size, src);
+		return strlen(dst);
+	}
+	return rdp_latin1_to_utf8(dst, size, src);
+}
+
+void rdp_copy_utf8(char* dst, size_t size, const char* src)
+{
+	const uint8_t* p = (const uint8_t*)(src ? src : "");
+	size_t n = 0;
+	if (!dst || size == 0)
+		return;
+	while (*p)
+	{
+		const uint8_t* start = p;
+		(void)rdp_utf8_next(&p);
+		{
+			size_t cl = (size_t)(p - start);
+			if (n + cl >= size)
+				break;
+			memcpy(dst + n, start, cl);
+			n += cl;
+		}
+	}
+	dst[n] = '\0';
+}
+

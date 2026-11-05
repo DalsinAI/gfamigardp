@@ -13,6 +13,7 @@
 #include "ui.h"
 #include "amipr.h"
 #include "session.h"
+#include "utf16.h"
 
 #include <exec/memory.h>
 #include <dos/dos.h>
@@ -103,15 +104,18 @@ int main(void)
 	if (!app.demo && (app.conn = AllocVec(sizeof(struct rdp_conn), MEMF_CLEAR)) != NULL)
 		rdp_conn_init(app.conn);
 	info.conn = app.conn;
-	/* USER/K and DOMAIN/K fill the window's fields (and the demo session's title) */
+	/* USER/K and DOMAIN/K: the Shell is Latin-1; OpenLayout fields are UTF-8 (review L1) */
 	if (args[ARG_USER])
-		snprintf(info.user, sizeof(info.user), "%s", (const char*)args[ARG_USER]);
+		rdp_amiga_to_utf8(info.user, sizeof(info.user), (const char*)args[ARG_USER]);
 	if (args[ARG_DOMAIN])
-		snprintf(info.domain, sizeof(info.domain), "%s", (const char*)args[ARG_DOMAIN]);
+		rdp_amiga_to_utf8(info.domain, sizeof(info.domain), (const char*)args[ARG_DOMAIN]);
 	go = 0;
 	if (app.demo && args[ARG_SESSION])
 	{
-		snprintf(info.host, sizeof(info.host), "%s", args[ARG_HOST] ? (const char*)args[ARG_HOST] : "desktop01.example.org");
+		if (args[ARG_HOST])
+			rdp_amiga_to_utf8(info.host, sizeof(info.host), (const char*)args[ARG_HOST]);
+		else
+			snprintf(info.host, sizeof(info.host), "%s", "desktop01.example.org");
 		if (!info.user[0])
 			strcpy(info.user, "sam");
 		info.width = 800;

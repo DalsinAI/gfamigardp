@@ -78,7 +78,37 @@ static const uint8_t OID_ECDSA_PREFIX[] = { 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 
 static const uint8_t OID_SAN[] = { 0x55, 0x1d, 0x11 };
 static const uint8_t OID_CN[] = { 0x55, 0x04, 0x03 };
 
-static int sig_hash_of(const struct der* oid)
+/* digest OIDs inside RSASSA-PSS-params (RFC 4055 2.1) */
+static const uint8_t OID_SHA1[] = { 0x2b, 0x0e, 0x03, 0x02, 0x1a };
+static const uint8_t OID_SHA256[] = { 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01 };
+static const uint8_t OID_SHA384[] = { 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02 };
+static const uint8_t OID_SHA512[] = { 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03 };
+
+/* RSASSA-PSS: the hash is in [0] EXPLICIT HashAlgorithm (DEFAULT sha1).
+ * Missing params mean SHA-1; RFC 5929 then upgrades that to SHA-256. */
+static int pss_hash_of(struct der params)
+{
+	struct der seq, ha, oid;
+	if (params.n == 0)
+		return AMIPR_SHA1;
+	if (der_expect(&params, 0x30, &seq, NULL) != 0)
+		return AMIPR_SHA256; /* malformed: SHA-256 is what RDP servers use */
+	if (der_expect(&seq, 0xa0, &ha, NULL) != 0)
+		return AMIPR_SHA1; /* DEFAULT sha1Identifier */
+	if (der_expect(&ha, 0x30, &ha, NULL) != 0 || der_expect(&ha, 0x06, &oid, NULL) != 0)
+		return AMIPR_SHA256;
+	if (oid_is(&oid, OID_SHA1, sizeof(OID_SHA1)))
+		return AMIPR_SHA1;
+	if (oid_is(&oid, OID_SHA256, sizeof(OID_SHA256)))
+		return AMIPR_SHA256;
+	if (oid_is(&oid, OID_SHA384, sizeof(OID_SHA384)))
+		return AMIPR_SHA384;
+	if (oid_is(&oid, OID_SHA512, sizeof(OID_SHA512)))
+		return AMIPR_SHA512;
+	return AMIPR_SHA256;
+}
+
+static int sig_hash_of(const struct der* oid, struct der params)
 {
 	if (oid->n == sizeof(OID_PKCS1_PREFIX) + 1 &&
 	    memcmp(oid->p, OID_PKCS1_PREFIX, sizeof(OID_PKCS1_PREFIX)) == 0)
@@ -88,8 +118,8 @@ static int sig_hash_of(const struct der* oid)
 			case 4:  /* md5WithRSAEncryption */
 			case 5:  /* sha1WithRSAEncryption */
 				return AMIPR_SHA1;
-			case 10: /* RSASSA-PSS: the hash is in the parameters; SHA-256 is
-			          * what RDP servers use, and what we assume */
+			case 10: /* RSASSA-PSS: hash from the parameters (review L5) */
+				return pss_hash_of(params);
 			case 11: return AMIPR_SHA256;
 			case 12: return AMIPR_SHA384;
 			case 13: return AMIPR_SHA512;
@@ -157,7 +187,7 @@ int rdp_x509_parse(struct rdp_x509* c, const uint8_t* der, size_t len)
 	c->tbs_len = tbsw.n;
 	/* signatureAlgorithm, after the TBS */
 	if (der_expect(&cert, 0x30, &alg, NULL) == 0 && der_expect(&alg, 0x06, &oid, NULL) == 0)
-		c->sig_hash = sig_hash_of(&oid);
+		c->sig_hash = sig_hash_of(&oid, alg); /* alg now holds any parameters after the OID */
 
 	(void)der_expect(&tbs, 0xa0, &tmp, NULL); /* [0] version */
 	if (der_expect(&tbs, 0x02, &tmp, NULL) != 0)

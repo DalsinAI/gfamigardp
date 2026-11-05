@@ -47,6 +47,10 @@ static ULONG io_hook(struct Hook* hook, struct OTConnection* conn, struct OTIOMe
 		return (ULONG)OTERR_WOULDBLOCK;
 	if (n < 0)
 		return (ULONG)OTERR_IO;
+	/* recv 0 is end of stream: pass OTERR_CLOSED, not "0 bytes", so a close
+	 * mid-record cannot spin as a short read (review L6) */
+	if (n == 0 && msg->MethodID == OTIO_READ)
+		return (ULONG)OTERR_CLOSED;
 	return (ULONG)n;
 }
 

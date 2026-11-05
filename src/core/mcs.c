@@ -11,6 +11,7 @@
 #include "amipr.h"
 #include <exec/memory.h>
 #include <proto/exec.h>
+#include <stdio.h>
 #include <string.h>
 
 #define BUF 16384
@@ -63,14 +64,23 @@ static int tpkt_read(struct rdp_transport* t, uint8_t* buf, struct rdp_stream* s
 	return tpkt_data(buf, (size_t)n, s);
 }
 
-/* the X.224 Data TPDU in a TPKT of n bytes: s is set on what follows it */
+/* the X.224 Data TPDU in a TPKT of n bytes: s is set on what follows it.
+ * An X.224 Disconnect Request (the peer closing cleanly) is AMIPR_ECLOSED,
+ * not "not RDP" (review L10). */
 static int tpkt_data(uint8_t* buf, size_t n, struct rdp_stream* s)
 {
+	uint8_t li, code;
 	rdp_s_init(s, buf, n);
 	rdp_s_skip(s, RDP_TPKT_HEADER);
-	if (rdp_s_get_u8(s) != 2 || rdp_s_get_u8(s) != RDP_X224_DT)
+	li = rdp_s_get_u8(s);
+	code = rdp_s_get_u8(s);
+	if (s->err)
 		return RDP_E_PROTO;
-	rdp_s_skip(s, 1);
+	if ((code & 0xF0) == RDP_X224_DR)
+		return AMIPR_ECLOSED;
+	if (li != 2 || code != RDP_X224_DT)
+		return RDP_E_PROTO;
+	rdp_s_skip(s, 1); /* EOT */
 	return s->err ? RDP_E_PROTO : 0;
 }
 
@@ -236,7 +246,7 @@ static void client_data(struct rdp_stream* s, const struct rdp_settings* set, ui
 	rdp_s_u16le(s, set->height);
 	rdp_s_u16le(s, 0xCA01);              /* colorDepth RNS_UD_COLOR_8BPP; see highColorDepth */
 	rdp_s_u16le(s, 0xAA03);              /* SASSequence RNS_UD_SAS_DEL */
-	rdp_s_u32le(s, 0x00000409);          /* keyboardLayout: US */
+	rdp_s_u32le(s, set->keyboard_layout ? set->keyboard_layout : 0x00000409); /* locale (review L7) */
 	rdp_s_u32le(s, 2600);                /* clientBuild */
 	utf16_fixed(s, "AMIGA", 32);         /* clientName */
 	rdp_s_u32le(s, 4);                   /* keyboardType: IBM enhanced (101/102) */
@@ -526,14 +536,28 @@ static int send_client_info(struct rdp_transport* t, uint8_t* buf, const struct 
 	utf16z(&s, addr);
 	rdp_s_u16le(&s, (uint16_t)(2 * (strlen(dir) + 1)));
 	utf16z(&s, dir);
-	/* TS_TIME_ZONE_INFORMATION (2.2.1.11.1.1.1.1): UTC, no daylight time */
-	rdp_s_u32le(&s, 0);                  /* Bias */
-	utf16_fixed(&s, "GMT Standard Time", 64);
-	rdp_s_bytes(&s, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 16);
-	rdp_s_u32le(&s, 0);
-	utf16_fixed(&s, "GMT Daylight Time", 64);
-	rdp_s_bytes(&s, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 16);
-	rdp_s_u32le(&s, 0);
+	/* TS_TIME_ZONE_INFORMATION (2.2.1.11.1.1.1.1): Bias from locale.library
+	 * (minutes to add to local to get UTC). No DST table: the Amiga locale
+	 * only has the current offset (review L7). */
+	{
+		int bias = set->timezone_bias_set ? set->timezone_bias
+		                                 : -amipr_utc_offset_minutes();
+		char std[32];
+		int east = -bias; /* minutes east of UTC, for the name */
+		if (east == 0)
+			snprintf(std, sizeof(std), "GMT Standard Time");
+		else if (east > 0)
+			snprintf(std, sizeof(std), "GMT+%02d:%02d", east / 60, east % 60);
+		else
+			snprintf(std, sizeof(std), "GMT-%02d:%02d", (-east) / 60, (-east) % 60);
+		rdp_s_u32le(&s, (uint32_t)bias);
+		utf16_fixed(&s, std, 64);
+		rdp_s_bytes(&s, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 16);
+		rdp_s_u32le(&s, 0);
+		utf16_fixed(&s, std, 64); /* no separate daylight name */
+		rdp_s_bytes(&s, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 16);
+		rdp_s_u32le(&s, 0);                  /* DaylightBias 0: no DST */
+	}
 	rdp_s_u32le(&s, 0);                  /* clientSessionId */
 	rdp_s_u32le(&s, 0x00000007);         /* performanceFlags: no wallpaper, full-window drag, menu animations */
 	rdp_s_u16le(&s, 0);                  /* cbAutoReconnectCookie */

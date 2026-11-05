@@ -48,7 +48,8 @@ static int confirm(struct rdp_conn* c)
 	uint16_t h = c->demand.height ? c->demand.height : c->height;
 	int rc;
 	rdp_s_init(&s, pdu, sizeof(pdu));
-	if (rdp_build_confirm_active(&s, &c->demand, c->mr.user_channel, w, h, c->depth ? c->depth : 16) < 0)
+	if (rdp_build_confirm_active(&s, &c->demand, c->mr.user_channel, w, h, c->depth ? c->depth : 16,
+	                             c->keyboard_layout) < 0)
 		return RDP_E_SPACE;
 	rc = rdp_mcs_send_data(&c->t, c->tx, TX_BUF, c->mr.user_channel, c->mr.io_channel, pdu, s.pos);
 	/* 2.2.1.14 to 2.2.1.18: the client sends these straight after it, in this order */
@@ -135,13 +136,19 @@ static int handle(struct rdp_conn* c, size_t len)
 					if (c->act == RDP_ACT_CONFIRMED) c->act = RDP_ACT_SYNC;
 					break;
 				case RDP_PDUTYPE2_CONTROL:
-					if (sh.action == RDP_CTRLACTION_COOPERATE && c->act < RDP_ACT_COOPERATE && c->act >= RDP_ACT_CONFIRMED)
+					/* compare against the activation states only: DEACTIVATED and
+					 * ENDED sort after ACTIVE, so a >= CONFIRMED test would bring
+					 * a deactivated session back (review L3) */
+					if (sh.action == RDP_CTRLACTION_COOPERATE &&
+					    (c->act == RDP_ACT_CONFIRMED || c->act == RDP_ACT_SYNC))
 						c->act = RDP_ACT_COOPERATE;
-					else if (sh.action == RDP_CTRLACTION_GRANTED_CONTROL && c->act >= RDP_ACT_CONFIRMED && c->act < RDP_ACT_GRANTED)
+					else if (sh.action == RDP_CTRLACTION_GRANTED_CONTROL &&
+					         (c->act == RDP_ACT_CONFIRMED || c->act == RDP_ACT_SYNC || c->act == RDP_ACT_COOPERATE))
 						c->act = RDP_ACT_GRANTED;
 					break;
 				case RDP_PDUTYPE2_FONTMAP:
-					if (c->act >= RDP_ACT_CONFIRMED)
+					if (c->act == RDP_ACT_CONFIRMED || c->act == RDP_ACT_SYNC ||
+					    c->act == RDP_ACT_COOPERATE || c->act == RDP_ACT_GRANTED)
 						c->act = RDP_ACT_ACTIVE;
 					break;
 				case RDP_PDUTYPE2_SET_ERROR_INFO:

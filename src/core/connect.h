@@ -27,7 +27,12 @@ struct rdp_settings
 	                             ("drdynvc,cliprdr"); NULL or "": no TS_UD_CS_NET */
 	const char* nla_dump;     /* NULL, or a file for the NLA TSRequests in hex: the NEGOTIATE,
 	                             the CHALLENGE, the AUTHENTICATE and the server's answer to it;
-	                             never the TSCredentials (they hold the sealed password) */
+	                             never the TSCredentials (they hold the sealed password).
+	                             The CHALLENGE + AUTHENTICATE together are an NTLMv2 response
+	                             that can be cracked offline: do not share a DUMP file (review L4). */
+	uint32_t keyboard_layout; /* CS_CORE / Input capability: 0 = US 0x0409, or a Windows KLID */
+	int timezone_bias;         /* TS_TIME_ZONE_INFORMATION Bias (minutes to add to local for UTC) */
+	int timezone_bias_set;     /* 1: timezone_bias was filled; 0: take it from locale.library */
 };
 
 void rdp_settings_default(struct rdp_settings* s);

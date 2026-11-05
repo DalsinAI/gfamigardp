@@ -35,6 +35,7 @@ struct rdp_conn
 	uint32_t selected;           /* the security protocol the server chose */
 	struct rdp_mcs_result mr;
 	uint16_t width, height, depth;   /* what the client asked for */
+	uint32_t keyboard_layout;        /* Windows KLID for Confirm Active (review L7) */
 	int act;                     /* RDP_ACT_* */
 	struct rdp_demand demand;
 	uint32_t error_info;         /* the last Set Error Info, 0 none */

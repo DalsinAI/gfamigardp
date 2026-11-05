@@ -59,7 +59,7 @@ int main(void)
 		memset(&d, 0, sizeof(d));
 		d.share_id = 0x103EA;
 		rdp_s_init(&s, buf, sizeof(buf));
-		CHECK(rdp_build_confirm_active(&s, &d, 1007, 1024, 768, 16) > 0, "build");
+		CHECK(rdp_build_confirm_active(&s, &d, 1007, 1024, 768, 16, 0x0409) > 0, "build");
 		total = u16(buf);
 		CHECK(total == s.pos, "totalLength %u vs %zu", total, s.pos);
 		CHECK((u16(buf + 2) & 0x0F) == RDP_PDUTYPE_CONFIRMACTIVE, "type");
@@ -112,6 +112,26 @@ int main(void)
 		buf[0] = 18;
 		CHECK(rdp_share_parse(buf, sizeof(buf), &sh) == 0 && sh.body_len == 0, "18-byte data PDU");
 	}
+
+	/* review L1: Latin-1 entry points become UTF-8 before utf16 */
+	{
+		char out[16];
+		CHECK(rdp_latin1_to_utf8(out, sizeof(out), "J\xFCrgen") == 7 && !memcmp(out, "J\xC3\xBCrgen", 7), "latin1");
+		CHECK(rdp_amiga_to_utf8(out, sizeof(out), "J\xC3\xBCrgen") == 7 && !memcmp(out, "J\xC3\xBCrgen", 7), "amiga keeps utf8");
+		CHECK(rdp_utf8_ok("J\xC3\xBCrgen") && !rdp_utf8_ok("J\xFCrgen"), "utf8_ok");
+		rdp_copy_utf8(out, 5, "J\xC3\xBCrgen"); /* size 5 fits J+ü+r+NUL (4); stops before next */
+		CHECK(!strcmp(out, "J\xC3\xBCr"), "copy_utf8 size5 '%s'", out);
+		rdp_copy_utf8(out, 4, "J\xC3\xBCrgen"); /* size 4: J+ü+NUL only, no mid-sequence cut */
+		CHECK(!strcmp(out, "J\xC3\xBC"), "copy_utf8 size4 '%s'", out);
+	}
+	/* review L9: compression bit must not read past the end */
+	{
+		uint8_t one[] = { 0x80 }; /* compression=2, only 1 byte: head would be 4 */
+		struct rdp_fp_counts c;
+		memset(&c, 0, sizeof(c));
+		CHECK(rdp_fastpath_count(one, 1, &c) < 0, "short compressed update");
+	}
+
 	printf("%d passed, %d failed\n", passes, fails);
 	return fails != 0;
 }

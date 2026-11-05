@@ -64,7 +64,7 @@ struct cw
 	olui_el *host, *user, *domain, *password, *res, *depth, *sec, *favs, *status;
 	olui_el* fav_items[MAX_FAVOURITES];
 	struct session_info* info;
-	struct ct_handle ct; /* connection task: socket/TLS/NLA/MCS off the UI */
+	struct ct_handle* ct; /* connection task: socket/TLS/NLA/MCS off the UI */
 	int result; /* -1 running, 0 quit, 1 connect */
 	int busy;   /* 1 while a connection is being made (the window still answers) */
 	int pending; /* Connect asked for: done by the main loop */
@@ -72,6 +72,22 @@ struct cw
 
 /* Edit: the program's own clipboard for now (clipboard.device next) */
 static char s_clip[512];
+
+/* The connection task outlives the connection window: after READY the session
+ * window uses the socket, and Roadshow tears released sockets down when the
+ * opener's bsdsocket base is closed. Keep the task (and its base) until the
+ * session ends; ObtainSocket still moves the fd onto the UI task. */
+static struct ct_handle s_ct;
+static int s_ct_inited;
+
+void ui_ct_shutdown(void)
+{
+	if (s_ct_inited)
+	{
+		ct_shutdown(&s_ct);
+		s_ct_inited = 0;
+	}
+}
 
 static void set_status(struct cw* c, const char* text)
 {
@@ -223,7 +239,7 @@ static int ask_trust_msg(struct cw* c, struct ct_msg* m)
 static int ct_drain(struct cw* c)
 {
 	struct ct_msg* m;
-	while ((m = ct_get(&c->ct)) != NULL)
+	while ((m = ct_get(c->ct)) != NULL)
 	{
 		switch (m->type)
 		{
@@ -233,7 +249,7 @@ static int ct_drain(struct cw* c)
 			case CT_EVT_CERT:
 				set_status(c, "The computer's certificate needs your answer.");
 				olui_amiga_draw(c->a);
-				ct_cert_reply(&c->ct, ask_trust_msg(c, m));
+				ct_cert_reply(c->ct, ask_trust_msg(c, m));
 				break;
 			case CT_EVT_ERROR:
 				set_status(c, m->text[0] ? m->text : "Not connected.");
@@ -306,7 +322,7 @@ static void window_events(struct cw* c)
 		{
 			c->result = 0;
 			if (c->busy)
-				ct_cancel(&c->ct);
+				ct_cancel(c->ct);
 		}
 		ReplyMsg(&m->ExecMessage);
 		if (c->result >= 0 && !c->busy)
@@ -358,12 +374,12 @@ static void do_cookie_reconnect(struct cw* c)
 	params.arc_logon_id = info->arc.logon_id;
 	memcpy(params.arc_random, info->arc.random, sizeof(params.arc_random));
 	/* password left empty on purpose */
-	c->ct.conn = info->conn;
+	c->ct->conn = info->conn;
 	snprintf(line, sizeof(line), "Reconnecting to %s (session cookie)...", info->host);
 	set_status(c, line);
 	olui_amiga_draw(c->a);
 	info->want_reconnect = 0;
-	if (ct_connect(&c->ct, &params) < 0)
+	if (ct_connect(c->ct, &params) < 0)
 	{
 		set_status(c, "Could not start the reconnect.");
 		rdp_arc_clear(&info->arc);
@@ -459,11 +475,11 @@ static void do_connect(struct cw* c)
 		params.arc_logon_id = info->arc.logon_id;
 		memcpy(params.arc_random, info->arc.random, sizeof(params.arc_random));
 	}
-	c->ct.conn = conn;
+	c->ct->conn = conn;
 	snprintf(line, sizeof(line), "Connecting to %s...", info->host);
 	set_status(c, line);
 	olui_amiga_draw(c->a);
-	if (ct_connect(&c->ct, &params) < 0)
+	if (ct_connect(c->ct, &params) < 0)
 	{
 		set_status(c, "Could not start the connection task.");
 		wipe(params.password, sizeof(params.password));
@@ -480,7 +496,7 @@ static void on_click(olui* ui, const olui_event* ev, void* data)
 	if (c->busy)
 	{
 		if (!strcmp(ev->id, "cancel"))
-			ct_cancel(&c->ct);   /* stops the connection, not the program */
+			ct_cancel(c->ct);   /* stops the connection, not the program */
 		return;
 	}
 	if (!strcmp(ev->id, "connect")) request_connect(c);
@@ -536,7 +552,7 @@ static int shortcut(struct cw* c, UWORD code)
 		    olui_select_is_open(c->ui, c->sec))
 			return 0; /* Esc closes the open list first */
 		if (c->busy)
-			ct_cancel(&c->ct);
+			ct_cancel(c->ct);
 		else
 			c->result = 0;
 		return 1;
@@ -578,7 +594,7 @@ static void menu_pick(struct cw* c, UWORD code)
 			if ((ULONG)GTMENUITEM_USERDATA(item) == M_QUIT)
 			{
 				if (c->busy)
-					ct_cancel(&c->ct);
+					ct_cancel(c->ct);
 				c->result = 0;
 			}
 			code = item->NextSelect;
@@ -673,10 +689,16 @@ int connect_window(struct app* app, const char* host, struct session_info* info)
 			{
 				ULONG winsig = 1UL << c.win->UserPort->mp_SigBit;
 				ULONG ctsig = 0;
-				if (ct_init(&c.ct) == 0)
-					ctsig = 1UL << c.ct.ui_port->mp_SigBit;
-				else
-					set_status(&c, "Could not create the connection port.");
+				c.ct = &s_ct;
+				if (!s_ct_inited)
+				{
+					if (ct_init(&s_ct) == 0)
+						s_ct_inited = 1;
+					else
+						set_status(&c, "Could not create the connection port.");
+				}
+				if (s_ct_inited)
+					ctsig = 1UL << s_ct.ui_port->mp_SigBit;
 				if (c.info->want_reconnect && c.info->arc.have && ctsig)
 				{
 					do_cookie_reconnect(&c);
@@ -688,7 +710,7 @@ int connect_window(struct app* app, const char* host, struct session_info* info)
 					if (sig & SIGBREAKF_CTRL_C)
 					{
 						if (c.busy)
-							ct_cancel(&c.ct);
+							ct_cancel(c.ct);
 						c.result = 0;
 					}
 					if (c.result < 0 && (sig & winsig))
@@ -706,9 +728,15 @@ int connect_window(struct app* app, const char* host, struct session_info* info)
 						olui_amiga_draw(c.a);
 					}
 				}
-				if (c.result <= 0 && c.busy)
-					ct_cancel(&c.ct);
-				ct_shutdown(&c.ct);
+				if (c.result <= 0)
+				{
+					if (c.busy)
+						ct_cancel(c.ct);
+					/* Failed or quit: drop the connection task. On READY we
+					 * leave it running so its bsdsocket base stays open for
+					 * the session (ui_ct_shutdown after the session). */
+					ui_ct_shutdown();
+				}
 			}
 		}
 		else

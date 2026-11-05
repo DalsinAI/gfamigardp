@@ -653,6 +653,17 @@ int rdp_gfx_process_pdus(struct rdp_gfx* g, const uint8_t* p, size_t len)
 		if (rc < 0)
 		{
 			g->st.errors++;
+			/* One bad PDU must not drop the rest of a frame: EndFrame (and
+			 * its Frame Acknowledge) often follows WireToSurface in the same
+			 * zgfx burst; aborting here froze the desktop silently. Skip and
+			 * keep going while a frame is open. Out-of-memory still stops. */
+			if (rc == RDP_GFX_E_NOMEM)
+				return rc;
+			if (g->in_frame)
+			{
+				pos += plen;
+				continue;
+			}
 			return rc;
 		}
 		pos += plen;

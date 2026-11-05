@@ -162,6 +162,13 @@ static void test_planar(void)
 		CHECK(px[3] == 0xFF46505Au, "planar CS px3 %08lx", (unsigned long)px[3]);
 	}
 	CHECK(rdp_planar_decode((const uint8_t*)"\x08", 1, 1, 1, px, 1, scratch, 0) < 0, "planar CS without CLL");
+	/* Strong red, CLL 1: Co restores above 127; the old uint8 cast after the
+	 * shift sign-flipped it (0x5E1F60). Sign-extend first, then shift. */
+	{
+		static const uint8_t s[] = { 0x21, 63, 127, 0xC1 };
+		CHECK(rdp_planar_decode(s, sizeof(s), 1, 1, px, 1, scratch, 0) == 0 && px[0] == 0xFFFD0000u,
+		      "planar strong red %08lx", (unsigned long)px[0]);
+	}
 
 	/* uncompressed: B,G,R,X bytes */
 	{
@@ -341,6 +348,24 @@ static void test_flow(void)
 	CHECK(rdp_gfx_process_pdus(&g, in, n) < 0, "fill on missing surface");
 	CHECK(rdp_gfx_process_pdus(&g, in, n - 1) < 0, "short pdu");
 	CHECK(rdp_gfx_input(&g, (const uint8_t*)"\xE7", 1) < 0, "bad segment");
+	/* In-frame: a bad fill must not drop EndFrame (desktop freeze). */
+	{
+		size_t n2 = 0;
+		uint32_t errs = g.st.errors;
+		int acks = nsent;
+		rdp_s_init(&s, body, sizeof(body));
+		rdp_s_u32le(&s, 0); rdp_s_u32le(&s, 99);
+		n2 += pdu(in + n2, RDPGFX_CMDID_STARTFRAME, body, s.pos);
+		rdp_s_init(&s, body, sizeof(body));
+		rdp_s_u16le(&s, 9); rdp_s_u32le(&s, 0); rdp_s_u16le(&s, 0);  /* missing surface */
+		n2 += pdu(in + n2, RDPGFX_CMDID_SOLIDFILL, body, s.pos);
+		rdp_s_init(&s, body, sizeof(body));
+		rdp_s_u32le(&s, 99);
+		n2 += pdu(in + n2, RDPGFX_CMDID_ENDFRAME, body, s.pos);
+		CHECK(rdp_gfx_process_pdus(&g, in, n2) == 0, "bad pdu in frame continues");
+		CHECK(g.st.errors > errs && !g.in_frame, "bad counted, frame closed");
+		CHECK(nsent == acks + 1 && le32(sent[nsent - 1] + 12) == 99, "EndFrame still acked");
+	}
 	rdp_gfx_free(&g);
 }
 

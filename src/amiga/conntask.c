@@ -541,7 +541,10 @@ void ct_shutdown(struct ct_handle* h)
 			m->msg.mn_ReplyPort = NULL;
 			PutMsg(h->conn_port, &m->msg);
 		}
-		deadline = amipr_monotonic_us() + 5000000ULL;
+		/* Wait until the task exits. Freeing ui_port while it can still
+		 * post_ui (CT_EVT_QUITTED) crashes; do not give up after a short
+		 * timeout and delete the port under it. */
+		deadline = amipr_monotonic_us() + 30000000ULL;
 		while (h->running && amipr_monotonic_us() < deadline)
 		{
 			struct ct_msg* e;
@@ -561,14 +564,15 @@ void ct_shutdown(struct ct_handle* h)
 cleared:
 	while ((m = ct_get(h)) != NULL)
 		FreeVec(m);
-	if (h->ui_port)
+	/* Only free the reply port once the task is gone (or never started). */
+	if (h->ui_port && !h->running)
 	{
 		DeleteMsgPort(h->ui_port);
 		h->ui_port = NULL;
 	}
 	h->proc = NULL;
-	h->running = 0;
-	s_priv = NULL;
+	if (!h->running)
+		s_priv = NULL;
 }
 
 static int post_cmd(struct ct_handle* h, struct ct_msg* m)

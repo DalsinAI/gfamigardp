@@ -137,17 +137,19 @@ int rdp_planar_decode(const uint8_t* src, size_t len, uint32_t w, uint32_t h,
 			continue;
 		}
 		{
-			/* AYCoCg: Co, Cg come shifted right by CLL (3.1.9.1.4); shift them
-			 * back inserting zeros, read as signed 8 bits, then the inverse
-			 * matrix of 3.1.9.1.2 (the 1/2 terms) */
+			/* AYCoCg: stored Co/Cg are signed 8-bit after CLL reduction
+			 * (3.1.9.1.4); sign-extend first, shift left by CLL (zeros in the
+			 * low bits) to recover 9-bit chroma, then the inverse matrix of
+			 * 3.1.9.1.2 (the 1/2 terms). Casting to uint8 after the shift
+			 * truncated strong colours (pure red became 0x5E1F60). */
 			const uint8_t* Co = planes[2] + (size_t)(cs ? y / 2 : y) * cw;
 			const uint8_t* Cg = planes[3] + (size_t)(cs ? y / 2 : y) * cw;
 			for (x = 0; x < w; x++)
 			{
 				uint32_t cx = cs ? x / 2 : x;
 				int Y = P1[x];
-				int co = (int)(int8_t)(uint8_t)(Co[cx] << cll) / 2;
-				int cg = (int)(int8_t)(uint8_t)(Cg[cx] << cll) / 2;
+				int co = ((int)(int8_t)Co[cx] << cll) / 2;
+				int cg = ((int)(int8_t)Cg[cx] << cll) / 2;
 				int r = Y + co - cg, g = Y + cg, b = Y - co - cg;
 				if (opts & RDP_PLANAR_SWAP_RB)
 				{

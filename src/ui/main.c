@@ -135,6 +135,7 @@ int main(void)
 	}
 
 out:
+	ui_ct_shutdown();
 	if (app.conn)
 	{
 		rdp_conn_close(app.conn);

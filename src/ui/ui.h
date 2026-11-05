@@ -69,6 +69,8 @@ void fav_demo(struct app* app);
 
 /* connect_win.c: answers 1 when a session window should open (info filled), 0 to quit */
 int connect_window(struct app* app, const char* host, struct session_info* info);
+/* End the connection task (and its bsdsocket base) after the session. */
+void ui_ct_shutdown(void);
 
 /* session_win.c: answers 1 to go back to the connection window, 0 to quit */
 int session_window(struct app* app, struct session_info* info);

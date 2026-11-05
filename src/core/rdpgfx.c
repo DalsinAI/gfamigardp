@@ -95,6 +95,7 @@ int rdp_gfx_init(struct rdp_gfx* g, const struct rdp_mem* mem, uint16_t w, uint1
 
 static void surface_delete(struct rdp_gfx* g, struct rdp_gfx_surface* sf)
 {
+	rdp_progressive_free(&sf->prog, &g->mem);
 	rdp_mem_free(&g->mem, sf->px);
 	memset(sf, 0, sizeof(*sf));
 }
@@ -239,6 +240,49 @@ static int scratch(struct rdp_gfx* g, size_t n)
 	if (!g->scratch)
 		return RDP_GFX_E_NOMEM;
 	g->scratch_cap = n;
+	return 0;
+}
+
+static void prog_rect(void* user, uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+	struct rdp_rect r;
+	r.x0 = x0;
+	r.y0 = y0;
+	r.x1 = x1;
+	r.y1 = y1;
+	mark((struct rdp_gfx_surface*)user, &r);
+}
+
+/* RDPGFX_WIRE_TO_SURFACE_PDU_2 (2.2.2.2): RemoteFX Progressive. A bad
+ * stream is counted and skipped; the session goes on. */
+static int wire_to_surface_2(struct rdp_gfx* g, struct rdp_stream* s)
+{
+	uint16_t id = rdp_s_get_u16le(s), codec = rdp_s_get_u16le(s);
+	uint32_t ctx = rdp_s_get_u32le(s), len;
+	uint8_t fmt = rdp_s_get_u8(s);
+	struct rdp_gfx_surface* sf;
+	int rc;
+	(void)ctx;
+	(void)fmt;
+	len = rdp_s_get_u32le(s);
+	if (s->err || rdp_s_left(s) < len)
+		return RDP_GFX_E_PROTO;
+	if (codec < 16)
+		g->st.codec_count[codec]++;
+	if (codec != RDPGFX_CODECID_CAPROGRESSIVE || !(sf = surface_find(g, id)))
+	{
+		g->st.skipped_codec++;
+		g->st.last_skipped_codec = codec;
+		rdp_s_skip(s, len);
+		return 0;
+	}
+	rc = rdp_progressive_decode(&sf->prog, &g->mem, s->p + s->pos, len, sf->px, sf->w, sf->h,
+	                            prog_rect, sf, &g->st.prog);
+	rdp_s_skip(s, len);
+	if (rc < 0)
+		g->st.prog_errors++;
+	else
+		g->st.progressive++;
 	return 0;
 }
 
@@ -540,11 +584,7 @@ static int handle(struct rdp_gfx* g, uint16_t cmd, struct rdp_stream* s)
 	case RDPGFX_CMDID_WIRETOSURFACE_1:
 		return wire_to_surface_1(g, s);
 	case RDPGFX_CMDID_WIRETOSURFACE_2:
-		/* RemoteFX Progressive only; not offered a decoder yet */
-		g->st.codec_count[RDPGFX_CODECID_CAPROGRESSIVE]++;
-		g->st.skipped_codec++;
-		g->st.last_skipped_codec = RDPGFX_CODECID_CAPROGRESSIVE;
-		return 0;
+		return wire_to_surface_2(g, s);
 	case RDPGFX_CMDID_DELETEENCODINGCONTEXT:
 	case RDPGFX_CMDID_CACHEIMPORTREPLY:   /* we send no offer, so nothing is imported */
 	case RDPGFX_CMDID_MAPSURFACETOWINDOW:

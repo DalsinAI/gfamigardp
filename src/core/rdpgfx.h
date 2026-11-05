@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include "gfx_fb.h"
 #include "zgfx.h"
+#include "progressive.h"
 
 #define RDPGFX_CHANNEL_NAME "Microsoft::Windows::RDS::Graphics"
 
@@ -97,6 +98,7 @@ struct rdp_gfx_surface
 	uint32_t ox, oy;              /* on the output buffer, when mapped */
 	uint32_t* px;                 /* w x h */
 	struct rdp_dirty dirty;       /* changed since the last flush */
+	struct rdp_prog_surface prog; /* RemoteFX Progressive tile state */
 };
 
 struct rdp_gfx_cache_entry
@@ -114,6 +116,8 @@ struct rdp_gfx_stats
 	uint32_t avc_seen;            /* never offered, should stay 0 */
 	uint32_t errors;
 	uint16_t last_skipped_codec;
+	uint32_t progressive, prog_errors;   /* WireToSurface2 decoded / rejected */
+	struct rdp_prog_stats prog;
 	uint32_t codec_count[16];     /* WireToSurface tiles by codecId (WireToSurface2: 9, Progressive) */
 };
 

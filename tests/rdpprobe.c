@@ -142,6 +142,29 @@ static void print_conn(int rc, const struct rdp_conn* c)
 				any = 1;
 			}
 		printf("%s\n", any ? "" : " none yet");
+		printf("RDPGFX progressive: %lu streams, %lu bad; tiles simple %lu, first %lu, upgrade %lu, skipped %lu, nomem %lu.\n",
+		       (unsigned long)c->gfx->st.progressive, (unsigned long)c->gfx->st.prog_errors,
+		       (unsigned long)c->gfx->st.prog.simple, (unsigned long)c->gfx->st.prog.first,
+		       (unsigned long)c->gfx->st.prog.upgrade, (unsigned long)c->gfx->st.prog.skipped,
+		       (unsigned long)c->gfx->st.prog.nomem);
+		if (c->gfx->fb.px)
+		{
+			/* a coarse look at the output buffer: mean colour, lit pixels on a grid */
+			unsigned long rs = 0, gs = 0, bs = 0, n = 0, lit = 0;
+			uint32_t y, x;
+			for (y = 0; y < c->gfx->fb.h; y += 8)
+				for (x = 0; x < c->gfx->fb.w; x += 8)
+				{
+					uint32_t v = c->gfx->fb.px[(size_t)y * c->gfx->fb.stride + x];
+					rs += (v >> 16) & 0xFF;
+					gs += (v >> 8) & 0xFF;
+					bs += v & 0xFF;
+					lit += (v & 0xFFFFFF) != 0;
+					n++;
+				}
+			if (n)
+				printf("RDPGFX output: mean RGB %lu/%lu/%lu, %lu of %lu sampled pixels not black.\n", rs / n, gs / n, bs / n, lit, n);
+		}
 	}
 	if (c->fp.updates)
 	{

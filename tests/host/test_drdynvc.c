@@ -480,6 +480,40 @@ static void test_dvc_oversize_dropped(void)
 	rdp_dynvc_free(&d);
 }
 
+/* review 2 N6: a channel name of 64 bytes or more is refused with E_FAIL
+ * for that channel only; the session and the next create go on */
+static void test_long_name_refused(void)
+{
+	struct rdp_dynvc d;
+	const char* name = "Microsoft::Windows::RDS::Graphics";
+	char longname[200];
+	uint8_t pdu[8];
+	static const int lens[] = { 64, 65, 100, 150 };
+	unsigned i;
+	int n;
+
+	reset_cb();
+	rdp_dynvc_init(&d, capture_send, NULL);
+	rdp_dynvc_listen(&d, name, on_create, on_data, on_close, NULL);
+	{ uint8_t caps[] = { 0x50, 0x00, 0x01, 0x00 }; feed_whole(&d, caps, 4); }
+	for (i = 0; i < sizeof(lens) / sizeof(lens[0]); i++)
+	{
+		n = lens[i];
+		memset(longname, 'A', sizeof(longname));
+		memcpy(longname, name, strlen(name));   /* a listener's name as its start */
+		longname[n] = 0;
+		got_create = 0;
+		CHECK(create_status(&d, (uint8_t)n, longname) == (int32_t)0x80004005L, "%d-byte name: E_FAIL", n);
+		CHECK(!got_create && rdp_dynvc_find(&d, (uint32_t)n) == NULL, "%d-byte name: not opened", n);
+	}
+	/* a name with no NUL at all is still a broken PDU */
+	pdu[0] = 0x10; pdu[1] = 9; pdu[2] = 'x'; pdu[3] = 'y';
+	CHECK(feed_whole(&d, pdu, 4) < 0, "no NUL: protocol error");
+	CHECK(create_status(&d, 5, name) == 0, "a good create after them");
+	CHECK(rdp_dynvc_find(&d, 5) != NULL, "open");
+	rdp_dynvc_free(&d);
+}
+
 int main(void)
 {
 	test_vc_reassembly();
@@ -496,6 +530,7 @@ int main(void)
 	test_slots_reused();
 	test_vc_oversize_dropped();
 	test_dvc_oversize_dropped();
+	test_long_name_refused();
 	printf("drdynvc: %d passed, %d failed\n", passes, fails);
 	return fails ? 1 : 0;
 }

@@ -179,14 +179,21 @@ static int handle_create(struct rdp_dynvc* d, int cbid, int pri, const uint8_t* 
 	d->creates++;
 	if (get_cbid(p, len, &pos, cbid, &id) < 0)
 		return RDP_E_PROTO;
-	while (pos < len && p[pos] && ni + 1 < sizeof(name))
-		name[ni++] = (char)p[pos++];
-	name[ni] = 0;
-	if (pos >= len || p[pos] != 0)
+	while (pos < len && p[pos])
+	{
+		if (ni + 1 < sizeof(name))
+			name[ni] = (char)p[pos];
+		ni++;
+		pos++;
+	}
+	if (pos >= len)
 		return RDP_E_PROTO; /* missing NUL */
 	pos++;
+	/* a name of RDP_DYNVC_NAME_MAX bytes or more is no listener's: that
+	 * channel is refused, the session goes on (review 2 N6) */
+	name[ni < sizeof(name) ? ni : 0] = 0;
 
-	L = find_listener(d, name);
+	L = ni < sizeof(name) ? find_listener(d, name) : NULL;
 	if (!L || !(ch = free_slot(d)))
 		status = (int32_t)0x80004005L; /* E_FAIL */
 	else if (L->on_create && (rc = L->on_create(d, id, name, L->user)) < 0)

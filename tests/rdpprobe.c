@@ -19,7 +19,7 @@
  * To find what a server wants of the client data (TS_UD_CS_CORE, CS_NET):
  * CHANNELS=drdynvc,cliprdr the static channels offered (default none),
  * EARLY=hex earlyCapabilityFlags (default 0001), DEPTHS=hex
- * supportedColorDepths (default 0007), BPP=8|15|16|24 (default 16).
+ * supportedColorDepths (default 0007), BPP=8|15|16|24|32 (default 16), GFXCAPS=hex mask of the RDPGFX sets to offer (bit 0 10.7 ... bit 8 8.0).
  * The certificate must chain to a trusted CA and name the host, or be
  * the one trusted before (ENVARC:GFAmigaRDP/KnownHosts, shared with
  * GFAmigaRDP); else RDPProbe prints it and stops, and TRUST saves it
@@ -49,8 +49,8 @@ static const char version[] = "$VER: RDPProbe 0.2 (04.11.2026) AmiCradle Team";
  * libnix's startup swaps to this much (review H2) */
 unsigned long __stack = 65536;
 
-#define TEMPLATE "HOST/A,PORT/N,USER/K,DOMAIN/K,PASSWORD/K,RDP/S,TLS/S,NLA/S,DUMP/K,ASKPASS/S,ACTIVATE/S,WAIT/N,CHANNELS/K,EARLY/K,DEPTHS/K,BPP/N,TRUST/S"
-enum { A_HOST, A_PORT, A_USER, A_DOMAIN, A_PASSWORD, A_RDP, A_TLS, A_NLA, A_DUMP, A_ASKPASS, A_ACTIVATE, A_WAIT, A_CHANNELS, A_EARLY, A_DEPTHS, A_BPP, A_TRUST, A_N };
+#define TEMPLATE "HOST/A,PORT/N,USER/K,DOMAIN/K,PASSWORD/K,RDP/S,TLS/S,NLA/S,DUMP/K,ASKPASS/S,ACTIVATE/S,WAIT/N,CHANNELS/K,EARLY/K,DEPTHS/K,BPP/N,TRUST/S,GFXCAPS/K"
+enum { A_HOST, A_PORT, A_USER, A_DOMAIN, A_PASSWORD, A_RDP, A_TLS, A_NLA, A_DUMP, A_ASKPASS, A_ACTIVATE, A_WAIT, A_CHANNELS, A_EARLY, A_DEPTHS, A_BPP, A_TRUST, A_GFXCAPS, A_N };
 
 static char pw[512];
 static char user_utf8[256];
@@ -129,6 +129,20 @@ static void print_conn(int rc, const struct rdp_conn* c)
 		       (unsigned long)c->gfx->st.planar, (unsigned long)c->gfx->st.skipped_codec,
 		       (unsigned)c->gfx->st.last_skipped_codec, (unsigned long)c->gfx->st.avc_seen,
 		       (unsigned long)c->gfx->st.errors);
+	if (c->gfx)
+	{
+		static const char* const names[16] = { "Uncompressed", "1", "2", "RemoteFX", "4", "5", "6", "7", "ClearCodec",
+		                                       "Progressive", "Planar", "AVC420", "Alpha", "13", "AVC444", "AVC444v2" };
+		int k, any = 0;
+		printf("RDPGFX codecs used:");
+		for (k = 0; k < 16; k++)
+			if (c->gfx->st.codec_count[k])
+			{
+				printf(" %s %lu", names[k], (unsigned long)c->gfx->st.codec_count[k]);
+				any = 1;
+			}
+		printf("%s\n", any ? "" : " none yet");
+	}
 	if (c->fp.updates)
 	{
 		printf("Fast-path updateCodes:");
@@ -359,6 +373,8 @@ again:
 	conn.keyboard_layout = s.keyboard_layout;
 	/* RDPGFX decode only when the Graphics Pipeline was offered (EARLY 0100) */
 	conn.gfx_enable = (s.early_caps & 0x0100) != 0;
+	if (args[A_GFXCAPS])
+		conn.gfx_caps_mask = (uint16_t)strtoul((const char*)args[A_GFXCAPS], NULL, 16);
 	printf("Connecting to %s, port %u...\n", s.host, (unsigned)s.port);
 	rc = rdp_transport_connect(t, s.host, s.port, s.timeout_us);
 	if (rc == 0)

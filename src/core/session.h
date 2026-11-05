@@ -62,6 +62,7 @@ struct rdp_conn
 	 * the connection (and the client data offered RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL);
 	 * with it off the channel is accepted and only counted, as before */
 	uint8_t gfx_enable;
+	uint16_t gfx_caps_mask;      /* which RDPGFX capability sets to offer (rdp_gfx_build_caps_mask); 0: all */
 	uint8_t gfx_open_pending;    /* caps advertise to send once the CREATE response went */
 	uint32_t gfx_chan;           /* its DVC channel id */
 	struct rdp_gfx* gfx;         /* surfaces, cache, output buffer (gfx->fb); NULL when off */

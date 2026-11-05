@@ -390,7 +390,9 @@ int rdp_dynvc_send_data(struct rdp_dynvc* d, uint32_t channel_id,
 		size_t hdr = 1 + (cbid == 0 ? 1 : cbid == 1 ? 2 : 4);
 		size_t chunk;
 		pos = 0;
-		if (first && len > 0)
+		/* DATA_FIRST only when the message needs more than one PDU
+		 * ([MS-RDPEDYC] 2.2.3.1, 3.1.5.1.4); one that fits goes as DATA */
+		if (first && len > 1500)
 		{
 			int lenbits = len <= 0xFF ? 0 : len <= 0xFFFF ? 1 : 2;
 			hdr += (lenbits == 0 ? 1 : lenbits == 1 ? 2 : 4);

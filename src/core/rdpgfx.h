@@ -114,6 +114,7 @@ struct rdp_gfx_stats
 	uint32_t avc_seen;            /* never offered, should stay 0 */
 	uint32_t errors;
 	uint16_t last_skipped_codec;
+	uint32_t codec_count[16];     /* WireToSurface tiles by codecId (WireToSurface2: 9, Progressive) */
 };
 
 struct rdp_gfx
@@ -124,6 +125,7 @@ struct rdp_gfx
 	void* send_user;
 	struct rdp_zgfx zgfx;
 	uint32_t caps_version, caps_flags;
+	uint16_t offer_mask;          /* rdp_gfx_build_caps_mask; 0: every set */
 	uint8_t caps_ok, in_frame;
 	uint32_t frame_id, frames_decoded;
 	uint8_t* scratch;             /* planar planes */
@@ -141,6 +143,10 @@ void rdp_gfx_free(struct rdp_gfx* g);
 
 /* RDPGFX_CAPS_ADVERTISE_PDU (2.2.2.18) into buf; its length, or 0 if too small. */
 size_t rdp_gfx_build_caps(uint8_t* buf, size_t size);
+/* The same with only some of the sets: bit n is the n-th, newest first
+ * (10.7, 10.6, 10.5, 10.4, 10.3, 10.2, 10.0, 8.1, 8.0); 0: all of them.
+ * RDPProbe's GFXCAPS, to find what a server takes. */
+size_t rdp_gfx_build_caps_mask(uint8_t* buf, size_t size, uint16_t mask);
 /* Call once the channel is open (after the DYNVC_CREATE_RSP has gone):
  * sends the caps advertise. */
 int rdp_gfx_on_open(struct rdp_gfx* g);

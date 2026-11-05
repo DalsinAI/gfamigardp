@@ -262,7 +262,8 @@ static size_t client_data_len(const struct rdp_settings* set)
 
 static void client_data(struct rdp_stream* s, const struct rdp_settings* set, uint32_t selected)
 {
-	uint16_t high = set->depth == 8 ? 8 : set->depth == 15 ? 15 : set->depth == 24 ? 24 : 16;
+	/* 32: highColorDepth 24, with RNS_UD_CS_WANT_32BPP_SESSION in the early flags */
+	uint16_t high = set->depth == 8 ? 8 : set->depth == 15 ? 15 : (set->depth == 24 || set->depth == 32) ? 24 : 16;
 	/* TS_UD_CS_CORE */
 	rdp_s_u16le(s, 0xC001);
 	rdp_s_u16le(s, CS_CORE_LEN);

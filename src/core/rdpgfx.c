@@ -40,13 +40,26 @@ static void header(struct rdp_stream* s, uint16_t cmd, uint32_t len)
 
 size_t rdp_gfx_build_caps(uint8_t* buf, size_t size)
 {
+	return rdp_gfx_build_caps_mask(buf, size, 0);
+}
+
+size_t rdp_gfx_build_caps_mask(uint8_t* buf, size_t size, uint16_t mask)
+{
 	struct rdp_stream s;
-	size_t i, len = HDR + 2 + NOFFER * 12;
+	size_t i, n = 0, len;
+	if (!(mask & ((1u << NOFFER) - 1)))
+		mask = (uint16_t)((1u << NOFFER) - 1);
+	for (i = 0; i < NOFFER; i++)
+		if (mask & (1u << i))
+			n++;
+	len = HDR + 2 + n * 12;
 	rdp_s_init(&s, buf, size);
 	header(&s, RDPGFX_CMDID_CAPSADVERTISE, (uint32_t)len);
-	rdp_s_u16le(&s, (uint16_t)NOFFER);
+	rdp_s_u16le(&s, (uint16_t)n);
 	for (i = 0; i < NOFFER; i++)
 	{
+		if (!(mask & (1u << i)))
+			continue;
 		rdp_s_u32le(&s, offer[i].version);
 		rdp_s_u32le(&s, 4);
 		rdp_s_u32le(&s, offer[i].flags);
@@ -126,7 +139,7 @@ static int send_pdu(struct rdp_gfx* g, const uint8_t* p, size_t n)
 int rdp_gfx_on_open(struct rdp_gfx* g)
 {
 	uint8_t buf[HDR + 2 + NOFFER * 12];
-	size_t n = rdp_gfx_build_caps(buf, sizeof(buf));
+	size_t n = rdp_gfx_build_caps_mask(buf, sizeof(buf), g->offer_mask);
 	return n ? send_pdu(g, buf, n) : RDP_GFX_E_PROTO;
 }
 
@@ -247,6 +260,8 @@ static int wire_to_surface_1(struct rdp_gfx* g, struct rdp_stream* s)
 	data = s->p + s->pos;
 	rdp_s_skip(s, len);
 	(void)fmt;
+	if (codec < 16)
+		g->st.codec_count[codec]++;
 	if (codec == RDPGFX_CODECID_AVC420 || codec == RDPGFX_CODECID_AVC444 || codec == RDPGFX_CODECID_AVC444v2)
 	{
 		/* we never offered it; skip rather than tear the session down */
@@ -526,6 +541,7 @@ static int handle(struct rdp_gfx* g, uint16_t cmd, struct rdp_stream* s)
 		return wire_to_surface_1(g, s);
 	case RDPGFX_CMDID_WIRETOSURFACE_2:
 		/* RemoteFX Progressive only; not offered a decoder yet */
+		g->st.codec_count[RDPGFX_CODECID_CAPROGRESSIVE]++;
 		g->st.skipped_codec++;
 		g->st.last_skipped_codec = RDPGFX_CODECID_CAPROGRESSIVE;
 		return 0;

@@ -36,7 +36,7 @@ static int clamp_index(const char* s, int n)
 	return v < 0 || v >= n ? 0 : v;
 }
 
-static int parse_line(char* line, struct favourite* f)
+static int parse_line(char* line, struct favourite* f, int format)
 {
 	char* part[7];
 	int n = 0;
@@ -59,7 +59,7 @@ static int parse_line(char* line, struct favourite* f)
 	if (n > 3) copy_field(f->domain, sizeof(f->domain), part[3], strlen(part[3]));
 	f->res = n > 4 ? clamp_index(part[4], ui_nresolutions) : 1;
 	f->depth = n > 5 ? clamp_index(part[5], ui_ndepths) : ui_ndepths - 1;
-	f->security = n > 6 ? clamp_index(part[6], ui_nsecurity) : 0;
+	f->security = n > 6 ? ui_fav_security(part[6], format) : 0;
 	return 1;
 }
 
@@ -67,6 +67,7 @@ int fav_load(struct app* app)
 {
 	BPTR fh;
 	char line[512];
+	int format = 1;   /* until the format 2 header (review 2 N2) */
 
 	app->nfav = 0;
 	fh = Open((CONST_STRPTR)FAV_ENV, MODE_OLDFILE);
@@ -79,9 +80,11 @@ int fav_load(struct app* app)
 		size_t l = strlen(line);
 		while (l && (line[l - 1] == '\n' || line[l - 1] == '\r'))
 			line[--l] = 0;
+		if (ui_fav_format(line))
+			format = ui_fav_format(line);
 		if (line[0] == '#' || !line[0])
 			continue;
-		if (parse_line(line, &app->fav[app->nfav]))
+		if (parse_line(line, &app->fav[app->nfav], format))
 			app->nfav++;
 	}
 	Close(fh);
@@ -96,7 +99,7 @@ static int write_to(const char* path, const struct app* app)
 
 	if (!fh)
 		return 0;
-	FPuts(fh, (CONST_STRPTR) "# GFAmigaRDP favourites: name, host, user, domain, resolution, colours, security\n");
+	FPuts(fh, (CONST_STRPTR)UI_FAV_HEADER);
 	for (i = 0; i < app->nfav; i++)
 	{
 		const struct favourite* f = &app->fav[i];

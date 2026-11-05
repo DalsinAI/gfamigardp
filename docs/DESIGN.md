@@ -48,6 +48,8 @@ src/amiga and src/ui include Amiga headers.
 - Everything above reads TPKT packets ([MS-RDPBCGR] 2.2.1.1, T.123) or
   fast-path PDUs (2.2.9.1.2: the first byte's low two bits are 0).
 
+The connection sequence (TCP, TLS, NLA, MCS, licensing) runs on its own CreateNewProc task (`src/amiga/conntask.c`), talking to the UI only through exec message ports (`CT_CMD_*` / `CT_EVT_*`). The UI stays live for Cancel and the certificate dialog; after `CT_EVT_READY` the live `rdp_conn` is handed to the session window.
+
 ## Connection ([MS-RDPBCGR] 1.3.1.1)
 
 1. **Connection initiation** (2.2.1.1, 2.2.1.2): X.224 CR with the

@@ -14,6 +14,7 @@
 #include "x509.h"
 #include "session.h"
 #include "knownhosts.h"
+#include "conntask.h"
 #include "utf16.h"
 
 #include <exec/types.h>
@@ -61,12 +62,10 @@ struct cw
 	olui_el *host, *user, *domain, *password, *res, *depth, *sec, *favs, *status;
 	olui_el* fav_items[MAX_FAVOURITES];
 	struct session_info* info;
+	struct ct_handle ct; /* connection task: socket/TLS/NLA/MCS off the UI */
 	int result; /* -1 running, 0 quit, 1 connect */
 	int busy;   /* 1 while a connection is being made (the window still answers) */
-	int cancel; /* Cancel, Esc or Ctrl-C while busy: the connection stops */
-	int pending; /* Connect asked for: done by the main loop, outside the
-	                UI's event dispatch (the window's events are handled
-	                again from inside the connection's waits) */
+	int pending; /* Connect asked for: done by the main loop */
 };
 
 /* Edit: the program's own clipboard for now (clipboard.device next) */
@@ -187,251 +186,82 @@ static void do_delete(struct cw* c)
 }
 
 /* NLA's result for the status line; the password is never shown */
-static void nla_status(struct cw* c, int rc, const struct rdp_nla_result* r)
+/* CT_EVT_CERT: fingerprint and names from the connection task. */
+static int ask_trust_msg(struct cw* c, struct ct_msg* m)
 {
-	char line[200];
-	const char* text;
-
-	if (rc == RDP_E_NLA && r->gnerr == GNERR_SERVER)
-	{
-		text = rdp_ntstatus_text(r->server_error);
-		if (text)
-			snprintf(line, sizeof(line), "Logon refused: %s", text);
-		else
-			snprintf(line, sizeof(line), "Logon refused (0x%08lX).", (unsigned long)r->server_error);
-	}
-	else if (rc == RDP_E_NLA && r->early_auth)
-		snprintf(line, sizeof(line), "Logon refused: access denied.");
-	else if (rc == RDP_E_NLA)
-		snprintf(line, sizeof(line), "Logon failed: %s", r->lib_error ? r->lib_error : "?");
-	else if (r->closed_after == 2)
-		snprintf(line, sizeof(line), "The computer closed the connection: the user name or password may be wrong.");
-	else if (rc == AMIPR_ENOLIB)
-		snprintf(line, sizeof(line), "gfopenntlm.library is missing from LIBS:.");
-	else
-		snprintf(line, sizeof(line), "%s", rdp_error_text(rc));
-	set_status(c, line);
-}
-
-static const char* cert_reason(int e)
-{
-	switch (e)
-	{
-		case AMIPR_CERT_UNTRUSTED: return "it is not signed by an authority this Amiga trusts (self-signed?)";
-		case AMIPR_CERT_HOSTNAME: return "it is for another name";
-		case AMIPR_CERT_EXPIRED: return "it has expired or is not valid yet";
-		case AMIPR_CERT_BAD: return "it is malformed";
-		case AMIPR_CERT_NOSTORE: return "the trust store (S:GFOpenTLS) is missing";
-		case AMIPR_CERT_PINNED: return "it is not the pinned one";
-		default: return "it could not be checked";
-	}
-}
-
-/* AMIPR_ECERT: the certificate shown, and the user asked whether to trust
- * it for this computer (trust on first use, as SSH; review H1). 1 when it
- * was trusted and saved in the known hosts (the caller connects again,
- * pinning it), 0 not. changed: a certificate was trusted for it before,
- * and this is another one. */
-static int ask_trust(struct cw* c, const char* host, uint16_t port, struct rdp_transport* t, int changed)
-{
-	uint8_t fp[32];
-	char text[96], fp1[64], cn[128], body[2048];
-	const uint8_t* der;
-	size_t len;
-	struct rdp_x509 x;
-	int match = -1;
+	char text[96], fp1[64], body[2048];
 	struct EasyStruct es;
 
-	if (amipr_tls_peer_fingerprint(t->tls, fp) != 0)
-		return 0;
-	cn[0] = 0;
-	if (amipr_tls_peer_certificate(t->tls, &der, &len) == 0 && rdp_x509_parse(&x, der, len) == 0)
-	{
-		if (rdp_x509_common_name(&x, cn, sizeof(cn)) < 0)
-			cn[0] = 0;
-		match = rdp_x509_match_host(&x, host);
-	}
-	rdp_fingerprint_text(fp, text);
-	memcpy(fp1, text, 48);   /* two lines of 16 bytes each */
+	rdp_fingerprint_text(m->fp, text);
+	memcpy(fp1, text, 48);
 	fp1[47] = 0;
 	snprintf(body, sizeof(body),
 	         "%s"
-	         "The certificate of %s cannot be checked:\n%s.\n\n"
-	         "Issued to: %s\n"
-	         "Name matches %s: %s\n\n"
+	         "The certificate of %s cannot be checked by a certificate authority.\n\n"
+	         "%s\n\n"
 	         "SHA-256 fingerprint:\n%s\n%s\n\n"
 	         "Compare it with the one the computer's owner gives you.\n"
 	         "Trust this certificate for %s from now on?",
-	         changed ? "WARNING: this is NOT the certificate trusted before for this\n"
-	                   "computer. Someone may be listening in between; do not\n"
-	                   "trust it unless you know it was changed.\n\n" : "",
-	         host, cert_reason(amipr_tls_cert_error(t->tls)), cn[0] ? cn : "(no name)", host,
-	         match < 0 ? "?" : match ? "yes" : "NO", fp1, text + 48, host);
+	         m->changed ? "WARNING: this is NOT the certificate trusted before for this\n"
+	                      "computer. Someone may be listening in between; do not\n"
+	                      "trust it unless you know it was changed.\n\n" : "",
+	         m->host[0] ? m->host : "?",
+	         m->text[0] ? m->text : "(no details)",
+	         fp1, text + 48,
+	         m->host[0] ? m->host : "?");
 	memset(&es, 0, sizeof(es));
 	es.es_StructSize = sizeof(es);
-	es.es_Title = (UBYTE*)(changed ? APP_NAME ": certificate changed" : APP_NAME ": certificate");
+	es.es_Title = (UBYTE*)(m->changed ? APP_NAME ": certificate changed" : APP_NAME ": certificate");
 	es.es_TextFormat = (UBYTE*)"%s";
-	es.es_GadgetFormat = (UBYTE*)(changed ? "Trust the new one|Cancel" : "Trust|Cancel");
-	if (EasyRequest(c->win, &es, NULL, (ULONG)body) != 1)
-		return 0;
-	if (rdp_known_host_set(host, port, fp) < 0)
-	{
-		set_status(c, "The certificate could not be saved in ENVARC:GFAmigaRDP/KnownHosts.");
-		return 0;
-	}
-	return 1;
+	es.es_GadgetFormat = (UBYTE*)(m->changed ? "Trust the new one|Cancel" : "Trust|Cancel");
+	return EasyRequest(c->win, &es, NULL, (ULONG)body) == 1;
 }
 
-/* the real connection's first steps: TCP, the X.224 negotiation, TLS,
- * NLA's logon when the computer chose it, MCS and licensing. On success
- * the connection stays open in info->conn for the session window, which
- * then does the Capabilities Exchange on it; on failure it is closed. */
-static int probe(struct cw* c, struct session_info* info, ULONG protocols, const char* password)
+/* Drain events from the connection task. 1 when the session is ready. */
+static int ct_drain(struct cw* c)
 {
-	struct rdp_settings s;
-	struct rdp_conn* conn = info->conn;
-	struct rdp_transport* t = &conn->t;
-	struct rdp_x224_cc cc;
-	char line[160];
-	int rc, tries = 0;
-
-again:
-	rdp_conn_close(conn);    /* a session before this one */
-	rdp_conn_init(conn);
-	rdp_settings_default(&s);
-	s.host = info->host;
-	s.user = info->user;
-	s.domain = info->domain;
-	s.protocols = protocols;
-	rc = rdp_transport_connect(t, info->host, s.port, s.timeout_us);
-	if (rc == 0)
-		rc = rdp_negotiate(t, &s, &cc);
-	if (rc == 0 && cc.has_neg && cc.neg_type == RDP_NEG_FAILURE)
+	struct ct_msg* m;
+	while ((m = ct_get(&c->ct)) != NULL)
 	{
-		set_status(c, rdp_negfail_text(cc.failure));
-		goto fail;
-	}
-	if (rc == 0 && cc.selected == RDP_PROTOCOL_RDP)
-	{
-		set_status(c, "The computer offers only standard RDP security, which this version does not do.");
-		goto fail;
-	}
-	/* only a protocol we offered (review L8); rdp_negotiate already returns
-	 * RDP_E_DOWNGRADE, but a zero selected with has_neg still needs a word */
-	if (rc == 0 && cc.has_neg && cc.neg_type == RDP_NEG_RSP &&
-	    !(cc.selected & (RDP_PROTOCOL_SSL | RDP_PROTOCOL_HYBRID | RDP_PROTOCOL_HYBRID_EX)))
-	{
-		set_status(c, "The computer chose a security protocol this version does not use.");
-		goto fail;
-	}
-	if (rc == 0)
-	{
-		set_status(c, "Making a secure connection...");
-		olui_amiga_draw(c->a);
-		/* the certificate trusted before for this computer, if any */
-		t->have_pin = rdp_known_host_get(info->host, s.port, t->pin);
-		rc = rdp_transport_start_tls(t);
-		if (rc == AMIPR_ECERT && !tries++ && !c->cancel)
+		switch (m->type)
 		{
-			set_status(c, "The computer's certificate needs your answer.");
-			olui_amiga_draw(c->a);
-			if (ask_trust(c, info->host, s.port, t, t->have_pin))
-			{
-				set_status(c, "Connecting again with the trusted certificate...");
+			case CT_EVT_STATE:
+				set_status(c, m->text);
+				break;
+			case CT_EVT_CERT:
+				set_status(c, "The computer's certificate needs your answer.");
 				olui_amiga_draw(c->a);
-				goto again;
-			}
-			set_status(c, "Not connected: the certificate was not trusted.");
-			goto fail;
+				ct_cert_reply(&c->ct, ask_trust_msg(c, m));
+				break;
+			case CT_EVT_ERROR:
+				set_status(c, m->text[0] ? m->text : "Not connected.");
+				c->busy = 0;
+				break;
+			case CT_EVT_READY:
+				strncpy(c->info->security, m->security, sizeof(c->info->security) - 1);
+				c->busy = 0;
+				c->result = 1;
+				FreeVec(m);
+				return 1;
+			case CT_EVT_QUITTED:
+				c->busy = 0;
+				break;
+			default:
+				break;
 		}
+		FreeVec(m);
 	}
-	if (rc != 0)
-	{
-		snprintf(line, sizeof(line), "%s", rdp_error_text(rc));
-		set_status(c, line);
-		goto fail;
-	}
-	if (cc.selected & (RDP_PROTOCOL_HYBRID | RDP_PROTOCOL_HYBRID_EX))
-	{
-		const uint8_t* der;
-		size_t len;
-		struct rdp_x509 x;
-		struct rdp_nla_result nr;
-
-		if (!info->user[0])
-		{
-			set_status(c, "This computer needs a user name and password first (NLA).");
-			olui_focus(c->ui, c->user);
-			goto fail;
-		}
-		if (amipr_tls_peer_certificate(t->tls, &der, &len) != 0 || rdp_x509_parse(&x, der, len) != 0)
-		{
-			set_status(c, "The computer's certificate could not be read.");
-			goto fail;
-		}
-		set_status(c, "Logging on...");
-		olui_amiga_draw(c->a);
-		{
-			uint8_t cb[64];  /* up to SHA-512 */
-			int cbl = rdp_x509_channel_binding(&x, cb, sizeof(cb), NULL);
-			rc = rdp_nla(t, &s, password, x.pubkey, x.pubkey_len, cbl > 0 ? cb : NULL, cbl > 0 ? (size_t)cbl : 0,
-			             (cc.selected & RDP_PROTOCOL_HYBRID_EX) != 0, &nr);
-		}
-		if (rc != 0)
-		{
-			nla_status(c, rc, &nr);
-			goto fail;
-		}
-	}
-	/* MCS, GCC, the channels, the Client Info PDU and licensing */
-	{
-		struct rdp_mcs_result* mr = &conn->mr;
-		s.width = info->width;
-		s.height = info->height;
-		s.depth = (uint8_t)info->depth;
-		set_status(c, "Joining the session's channels...");
-		olui_amiga_draw(c->a);
-		rc = rdp_mcs_connect(t, &s, cc.selected, password, mr);
-		if (rc != 0)
-		{
-			if (mr->disconnect_reason)
-				snprintf(line, sizeof(line), "The computer ended the connection after %s (reason %u).",
-				         rdp_mcs_stage_name(mr->stage), mr->disconnect_reason - 1);
-			else if (mr->error_info)
-				snprintf(line, sizeof(line), "The computer ended the connection after %s (error 0x%08lX).",
-				         rdp_mcs_stage_name(mr->stage), (unsigned long)mr->error_info);
-			else if (rc == RDP_E_LICENSE && mr->lic_type == 0xFF)
-				snprintf(line, sizeof(line), "Licensing failed: %s.", rdp_license_error_text(mr->lic_error));
-			else
-				snprintf(line, sizeof(line), "Stopped after %s: %s", rdp_mcs_stage_name(mr->stage), rdp_error_text(rc));
-			set_status(c, line);
-			goto fail;
-		}
-		snprintf(info->security, sizeof(info->security), "%s, %s %s",
-		         cc.selected == RDP_PROTOCOL_SSL ? "TLS" : (cc.selected & RDP_PROTOCOL_HYBRID_EX) ? "NLA (EX)" : "NLA",
-		         amipr_tls_protocol(t->tls) == 0x0304 ? "TLS 1.3" : "TLS 1.2",
-		         amipr_tls_cipher(t->tls) ? amipr_tls_cipher(t->tls) : "");
-	}
-	conn->live = 1;
-	conn->selected = cc.selected;
-	conn->width = info->width;
-	conn->height = info->height;
-	conn->depth = info->depth;
-	conn->keyboard_layout = s.keyboard_layout;
-	return 1;
-fail:
-	rdp_conn_close(conn);
 	return 0;
 }
-
-static void menu_pick(struct cw* c, UWORD code);
-static int shortcut(struct cw* c, UWORD code);
 
 static void request_connect(struct cw* c)
 {
 	if (!c->busy)
 		c->pending = 1;
 }
+
+static void menu_pick(struct cw* c, UWORD code);
+static int shortcut(struct cw* c, UWORD code);
 
 /* the window's messages that have come */
 static void window_events(struct cw* c)
@@ -457,25 +287,13 @@ static void window_events(struct cw* c)
 		{
 			c->result = 0;
 			if (c->busy)
-				c->cancel = 1;
+				ct_cancel(&c->ct);
 		}
 		ReplyMsg(&m->ExecMessage);
 		if (c->result >= 0 && !c->busy)
 			break;
 	}
 	olui_amiga_draw(c->a);
-}
-
-/* the abort hook while connecting: the window's messages handled as they
- * come (refresh, typing, Cancel), from inside the network waits; nonzero
- * stops the connection */
-static int busy_events(void* user, uint32_t sigs)
-{
-	struct cw* c = user;
-	if (sigs & SIGBREAKF_CTRL_C)
-		c->cancel = 1;
-	window_events(c);
-	return c->cancel;
 }
 
 /* the password field's text into the caller's buffer, and the field's
@@ -501,9 +319,12 @@ static void do_connect(struct cw* c)
 	struct session_info* info = c->info;
 	struct rdp_conn* conn = info->conn;
 	const char* host = olui_get_text(c->host);
-	int r, d;
+	int r, d, s;
 	char line[320];
+	struct ct_msg params;
 
+	if (c->busy)
+		return;
 	if (!host[0])
 	{
 		set_status(c, "Type the computer's name or address first.");
@@ -517,8 +338,10 @@ static void do_connect(struct cw* c)
 	copy_text(info->domain, sizeof(info->domain), olui_get_text(c->domain));
 	r = olui_select_index(c->res);
 	d = olui_select_index(c->depth);
+	s = olui_select_index(c->sec);
 	if (r < 0 || r >= ui_nresolutions) r = 1;
 	if (d < 0 || d >= ui_ndepths) d = 2;
+	if (s < 0 || s >= ui_nsecurity) s = 0;
 	info->width = ui_resolutions[r].w ? ui_resolutions[r].w : (UWORD)c->app->screen->Width;
 	info->height = ui_resolutions[r].h ? ui_resolutions[r].h : (UWORD)c->app->screen->Height;
 	info->depth = ui_depths[d].bits;
@@ -534,27 +357,29 @@ static void do_connect(struct cw* c)
 		set_status(c, "Out of memory.");
 		return;
 	}
+	memset(&params, 0, sizeof(params));
+	strncpy(params.host, info->host, sizeof(params.host) - 1);
+	strncpy(params.user, info->user, sizeof(params.user) - 1);
+	strncpy(params.domain, info->domain, sizeof(params.domain) - 1);
+	params.port = 3389;
+	params.width = info->width;
+	params.height = info->height;
+	params.depth = (uint8_t)info->depth;
+	params.protocols = ui_security[s].protocols;
+	/* channels left empty: sibling owns DRDYNVC / CS_NET */
+	take_password(c, params.password, sizeof(params.password));
+	c->ct.conn = conn;
 	snprintf(line, sizeof(line), "Connecting to %s...", info->host);
 	set_status(c, line);
+	olui_amiga_draw(c->a);
+	if (ct_connect(&c->ct, &params) < 0)
 	{
-		char pw[512];
-		int s = olui_select_index(c->sec);
-		take_password(c, pw, sizeof(pw));
-		olui_amiga_draw(c->a);
-		if (s < 0 || s >= ui_nsecurity) s = 0;
-		/* the window keeps answering while the network is waited for:
-		 * Cancel, Esc, the close gadget or Ctrl-C stop it (review M2) */
-		c->busy = 1;
-		c->cancel = 0;
-		amipr_set_abort((1UL << c->win->UserPort->mp_SigBit) | SIGBREAKF_CTRL_C, busy_events, c);
-		if (probe(c, info, ui_security[s].protocols, pw))
-			c->result = 1;
-		amipr_set_abort(0, NULL, NULL);
-		if (c->cancel && c->result != 1)
-			set_status(c, "Cancelled.");
-		c->busy = 0;
-		wipe(pw, sizeof(pw));
+		set_status(c, "Could not start the connection task.");
+		wipe(params.password, sizeof(params.password));
+		return;
 	}
+	wipe(params.password, sizeof(params.password));
+	c->busy = 1;
 }
 
 static void on_click(olui* ui, const olui_event* ev, void* data)
@@ -564,7 +389,7 @@ static void on_click(olui* ui, const olui_event* ev, void* data)
 	if (c->busy)
 	{
 		if (!strcmp(ev->id, "cancel"))
-			c->cancel = 1;   /* stops the connection, not the program */
+			ct_cancel(&c->ct);   /* stops the connection, not the program */
 		return;
 	}
 	if (!strcmp(ev->id, "connect")) request_connect(c);
@@ -620,7 +445,7 @@ static int shortcut(struct cw* c, UWORD code)
 		    olui_select_is_open(c->ui, c->sec))
 			return 0; /* Esc closes the open list first */
 		if (c->busy)
-			c->cancel = 1;
+			ct_cancel(&c->ct);
 		else
 			c->result = 0;
 		return 1;
@@ -661,7 +486,8 @@ static void menu_pick(struct cw* c, UWORD code)
 			/* while connecting: Quit stops it and quits; the rest waits */
 			if ((ULONG)GTMENUITEM_USERDATA(item) == M_QUIT)
 			{
-				c->cancel = 1;
+				if (c->busy)
+					ct_cancel(&c->ct);
 				c->result = 0;
 			}
 			code = item->NextSelect;
@@ -754,13 +580,29 @@ int connect_window(struct app* app, const char* host, struct session_info* info)
 			olui_focus(c.ui, c.host);
 			if (olui_amiga_layout(c.a))
 			{
+				ULONG winsig = 1UL << c.win->UserPort->mp_SigBit;
+				ULONG ctsig = 0;
+				if (ct_init(&c.ct) == 0)
+					ctsig = 1UL << c.ct.ui_port->mp_SigBit;
+				else
+					set_status(&c, "Could not create the connection port.");
 				while (c.result < 0)
 				{
-					ULONG sig = Wait((1UL << c.win->UserPort->mp_SigBit) | SIGBREAKF_CTRL_C);
+					ULONG sig = Wait(winsig | ctsig | SIGBREAKF_CTRL_C);
 					if (sig & SIGBREAKF_CTRL_C)
+					{
+						if (c.busy)
+							ct_cancel(&c.ct);
 						c.result = 0;
-					if (c.result < 0)
+					}
+					if (c.result < 0 && (sig & winsig))
 						window_events(&c);
+					if (c.result < 0 && ctsig && (sig & ctsig))
+					{
+						if (ct_drain(&c))
+							break;
+						olui_amiga_draw(c.a);
+					}
 					while (c.result < 0 && c.pending)
 					{
 						c.pending = 0;
@@ -768,6 +610,9 @@ int connect_window(struct app* app, const char* host, struct session_info* info)
 						olui_amiga_draw(c.a);
 					}
 				}
+				if (c.result <= 0 && c.busy)
+					ct_cancel(&c.ct);
+				ct_shutdown(&c.ct);
 			}
 		}
 		else

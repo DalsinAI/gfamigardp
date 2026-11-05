@@ -290,7 +290,9 @@ int rdp_share_parse(const uint8_t* p, size_t len, struct rdp_share* o)
 	if (rdp_s_get_u8(&s) & 0x20)         /* compressedType PACKET_COMPRESSED: not asked for */
 		return RDP_E_PROTO_PDU;
 	rdp_s_skip(&s, 2);
-	if (s.err)
+	/* a data PDU shorter than its own 18-byte header: total - s.pos would
+	 * wrap round to a huge body_len (review M6) */
+	if (s.err || total < s.pos)
 		return RDP_E_PROTO_PDU;
 	o->body = p + s.pos;
 	o->body_len = total - s.pos;

@@ -95,6 +95,23 @@ int main(void)
 		CHECK(rdp_share_parse(buf, s.pos, &sh) == 0 && sh.type == RDP_PDUTYPE_DATA &&
 		      sh.type2 == RDP_PDUTYPE2_CONTROL && sh.action == RDP_CTRLACTION_COOPERATE && sh.share_id == 0x103EA, "parse back");
 	}
+	{
+		/* review M6: a data PDU whose totalLength is shorter than its own
+		 * 18-byte header must be refused, not wrap body_len round */
+		uint8_t buf[64];
+		struct rdp_share sh;
+		uint16_t t;
+		for (t = 6; t < 18; t++)
+		{
+			memset(buf, 0, sizeof(buf));
+			buf[0] = (uint8_t)t;
+			buf[2] = RDP_PDUTYPE_DATA | 0x10;
+			CHECK(rdp_share_parse(buf, sizeof(buf), &sh) < 0, "short data PDU (totalLength %u) accepted, body_len %lu",
+			      t, (unsigned long)sh.body_len);
+		}
+		buf[0] = 18;
+		CHECK(rdp_share_parse(buf, sizeof(buf), &sh) == 0 && sh.body_len == 0, "18-byte data PDU");
+	}
 	printf("%d passed, %d failed\n", passes, fails);
 	return fails != 0;
 }

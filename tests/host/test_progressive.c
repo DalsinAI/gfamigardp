@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "progressive.h"
 
 static int fails;
@@ -73,6 +74,24 @@ static int test_dwt(int re)
 	return maxerr;
 }
 
+
+static void bench_idwt(int re, int rounds)
+{
+	static int32_t buf[4096], tmp[20000];
+	int i, off, w, h, b;
+	clock_t t0, t1;
+	for (b = 0; b < 10; b++)
+		rdp_prog_band_layout(re, b, &off, &w, &h);
+	for (i = 0; i < 4096; i++)
+		buf[i] = (int32_t)((i * 13) & 255) - 128;
+	t0 = clock();
+	for (i = 0; i < rounds; i++)
+		rdp_prog_idwt(buf, re, tmp);
+	t1 = clock();
+	printf("bench idwt re=%d x%d: %.3f s (host clock)\n", re, rounds,
+	       (double)(t1 - t0) / (double)CLOCKS_PER_SEC);
+}
+
 int main(void)
 {
 	int16_t out[4096];
@@ -92,6 +111,8 @@ int main(void)
 	CHECK(nz == 0);
 	CHECK(test_dwt(1) <= 8);
 	CHECK(test_dwt(0) <= 8);
+	if (!fails)
+		bench_idwt(1, 200);
 	printf(fails ? "FAILED %d\n" : "all ok\n", fails);
 	return fails != 0;
 }

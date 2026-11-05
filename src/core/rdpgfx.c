@@ -188,7 +188,9 @@ static int send_frame_ack(struct rdp_gfx* g, uint32_t frame_id)
 	struct rdp_stream s;
 	rdp_s_init(&s, buf, sizeof(buf));
 	header(&s, RDPGFX_CMDID_FRAMEACKNOWLEDGE, sizeof(buf));
-	rdp_s_u32le(&s, 0);   /* queueDepth: QUEUE_DEPTH_UNAVAILABLE (2.2.2.13) */
+	/* One frame in flight: a slow 68040 asks the server to ease off
+	 * ([MS-RDPEGFX] 2.2.2.13) instead of QUEUE_DEPTH_UNAVAILABLE. */
+	rdp_s_u32le(&s, 1);
 	rdp_s_u32le(&s, frame_id);
 	rdp_s_u32le(&s, g->frames_decoded);
 	return send_pdu(g, buf, s.pos);

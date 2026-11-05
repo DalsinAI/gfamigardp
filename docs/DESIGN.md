@@ -114,11 +114,12 @@ The connection sequence (TCP, TLS, NLA, MCS, licensing) runs on its own CreateNe
   8.0-10.7 that never offer AVC (AVC_DISABLED on every 10.x, no 10.1),
   decompresses RDP8 bulk data (src/codec/zgfx.c), keeps surfaces, the
   bitmap cache and the Graphics Output Buffer (src/codec/gfx_fb.c, all
-  AllocVec(MEMF_ANY), so Fast RAM), decodes Uncompressed and Planar,
-  and acknowledges each frame; ClearCodec, Progressive and Alpha are
-  counted and skipped for now. With the flag off the channel is accepted
-  and counted only. The UI takes the dirty rectangles with
-  rdp_fb_take_dirty and blits them (not wired yet). Later:
+  AllocVec(MEMF_ANY), so Fast RAM), decodes Uncompressed, Planar and
+  RemoteFX Progressive, and acknowledges each frame (queueDepth 1 so a
+  slow client eases the server); ClearCodec and Alpha are counted and
+  skipped for now. With the flag off the channel is accepted and counted
+  only. The UI takes the dirty rectangles with rdp_fb_take_dirty and
+  blits them (WritePixelArray ARGB, pan offset applied). Later:
   cliprdr ([MS-RDPECLIP]), rdpsnd ([MS-RDPEA]) through AHI, maybe drive
   redirection ([MS-RDPEFS]).
 
@@ -136,8 +137,10 @@ decoded into it and the changed rectangles drawn:
    session's palette mapped to pens.
 
 The 68040 has no time to spare: 16-bit sessions at 800x600 by default,
-dirty rectangles only, no scaling. Full screen opens a screen of the
-session's size (the ModeID chosen with BestModeID).
+dirty rectangles only, no scaling. When the remote desktop is larger than
+the session band the user pans (left-drag, View menu, toolbar Home /
+Amiga-H); the mode line shows the visible size and offset. Full screen
+opens a screen of the session's size (the ModeID chosen with BestModeID).
 
 ## UI
 

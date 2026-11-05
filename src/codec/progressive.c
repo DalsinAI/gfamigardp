@@ -43,61 +43,111 @@ static void level_sizes(int re, int level, int* nl, int* nh)
 
 /* HLk is high horizontally and low vertically (the top-right of [MS-RDPRFX]
  * figure 7): width nh, height nl. LHk: width nl, height nh. */
+/* Precomputed once: band offset/w/h for both DWT layouts. Hot tiles call
+ * this dozens of times; a table keeps the 68040 off the size loops. */
+static struct { int16_t off, w, h; } s_band[2][NBANDS];
+static uint8_t s_band_ready;
+
+static void band_init(void)
+{
+	int re, band;
+	if (s_band_ready)
+		return;
+	for (re = 0; re < 2; re++)
+	{
+		int o = 0;
+		for (band = 0; band < NBANDS; band++)
+		{
+			int level = band == B_LL3 ? 3 : band / 3 + 1, nl, nh, bw, bh;
+			level_sizes(re, level, &nl, &nh);
+			switch (band == B_LL3 ? 3 : band % 3)
+			{
+			case 0: bw = nh; bh = nl; break;
+			case 1: bw = nl; bh = nh; break;
+			case 2: bw = nh; bh = nh; break;
+			default: bw = nl; bh = nl; break;
+			}
+			s_band[re][band].off = (int16_t)o;
+			s_band[re][band].w = (int16_t)bw;
+			s_band[re][band].h = (int16_t)bh;
+			o += bw * bh;
+		}
+	}
+	s_band_ready = 1;
+}
+
 void rdp_prog_band_layout(int re, int band, int* off, int* w, int* h)
 {
-	int b, o = 0, bw = 0, bh = 0;
-	for (b = 0; b <= band; b++)
+	band_init();
+	re = re ? 1 : 0;
+	if (band < 0 || band >= NBANDS)
 	{
-		int level = b == B_LL3 ? 3 : b / 3 + 1, nl, nh;
-		level_sizes(re, level, &nl, &nh);
-		switch (b == B_LL3 ? 3 : b % 3)
-		{
-		case 0: bw = nh; bh = nl; break;   /* HL */
-		case 1: bw = nl; bh = nh; break;   /* LH */
-		case 2: bw = nh; bh = nh; break;   /* HH */
-		default: bw = nl; bh = nl; break;  /* LL3 */
-		}
-		if (b < band)
-			o += bw * bh;
+		*off = *w = *h = 0;
+		return;
 	}
-	*off = o;
-	*w = bw;
-	*h = bh;
+	*off = s_band[re][band].off;
+	*w = s_band[re][band].w;
+	*h = s_band[re][band].h;
 }
 
 /* ---- bit reading, most significant bit first ([MS-RDPRFX] 3.1.8.1.7.3.1,
- * [MS-RDPEGFX] 3.2.8.1.5.2.1) ---- */
+ * [MS-RDPEGFX] 3.2.8.1.5.2.1). A 32-bit accumulator avoids a shift per bit
+ * on the 68040 hot path (RLGR / SRL). ---- */
 struct bits
 {
 	const uint8_t* p;
-	size_t len, pos;   /* pos in bits */
+	const uint8_t* end;
+	uint32_t buf;     /* next bits in the high end */
+	int nbuf;         /* how many bits are valid in buf */
+	size_t pos;       /* bits consumed (for bits_over) */
+	size_t lim;       /* len * 8 */
 };
 
 static void bits_init(struct bits* b, const uint8_t* p, size_t len)
 {
 	b->p = p;
-	b->len = len;
+	b->end = p + len;
+	b->buf = 0;
+	b->nbuf = 0;
 	b->pos = 0;
+	b->lim = len * 8;
+}
+
+static void bits_fill(struct bits* b)
+{
+	while (b->nbuf <= 24 && b->p < b->end)
+	{
+		b->buf |= (uint32_t)(*b->p++) << (24 - b->nbuf);
+		b->nbuf += 8;
+	}
 }
 
 static uint32_t get_bits(struct bits* b, int n)
 {
-	uint32_t v = 0;
-	while (n-- > 0)
+	uint32_t v;
+	if (n <= 0)
+		return 0;
+	if (b->nbuf < n)
+		bits_fill(b);
+	if (b->nbuf < n)
 	{
-		size_t byte = b->pos >> 3;
-		uint32_t bit = 0;
-		if (byte < b->len)
-			bit = (b->p[byte] >> (7 - (b->pos & 7))) & 1;
-		b->pos++;
-		v = (v << 1) | bit;
+		/* past the end: zeros, same as reading off the old bit stream */
+		v = b->nbuf ? (b->buf >> (32 - b->nbuf)) << (n - b->nbuf) : 0;
+		b->pos += (size_t)n;
+		b->buf = 0;
+		b->nbuf = 0;
+		return v;
 	}
+	v = b->buf >> (32 - n);
+	b->buf <<= n;
+	b->nbuf -= n;
+	b->pos += (size_t)n;
 	return v;
 }
 
 static int bits_over(const struct bits* b)
 {
-	return b->pos > b->len * 8 + 64;   /* far past the end: garbage */
+	return b->pos > b->lim + 64;   /* far past the end: garbage */
 }
 
 /* ---- RLGR1 ([MS-RDPRFX] 3.1.8.1.7.3.1) ---- */
@@ -419,7 +469,7 @@ static void render(struct ctx* c, const struct rdp_prog_tile* t, uint16_t xi, ui
 	for (r = 0; r < c->nrects; r++)
 	{
 		const uint8_t* q = c->rects + r * 8;
-		int32_t x0 = u16(q), y0 = u16(q + 2), x1 = x0 + u16(q + 4), y1 = y0 + u16(q + 6), x, y;
+		int32_t x0 = u16(q), y0 = u16(q + 2), x1 = x0 + u16(q + 4), y1 = y0 + u16(q + 6), y;
 		if (x0 < tx) x0 = tx;
 		if (y0 < ty) y0 = ty;
 		if (x1 > tx + 64) x1 = tx + 64;
@@ -430,18 +480,20 @@ static void render(struct ctx* c, const struct rdp_prog_tile* t, uint16_t xi, ui
 			continue;
 		for (y = y0; y < y1; y++)
 		{
-			uint32_t* dst = c->px + (size_t)y * c->w;
-			const int32_t* Y = c->ycc + (y - ty) * 64 - tx;
+			uint32_t* dst = c->px + (size_t)y * c->w + (size_t)x0;
+			const int32_t* Y = c->ycc + (y - ty) * 64 + (x0 - tx);
 			const int32_t* Cb = Y + RDP_PROG_COEFS;
 			const int32_t* Cr = Cb + RDP_PROG_COEFS;
-			for (x = x0; x < x1; x++)
+			int n = (int)(x1 - x0), i;
+			/* [MS-RDPRFX] 3.1.8.2.5: Y + 128; the matrix in 16.16.
+			 * Pointer form avoids the per-pixel x index and the * c->w add. */
+			for (i = 0; i < n; i++)
 			{
-				/* [MS-RDPRFX] 3.1.8.2.5: Y + 128; the matrix in 16.16 */
-				int32_t yy = Y[x] + 128, cb = Cb[x], cr = Cr[x];
+				int32_t yy = Y[i] + 128, cb = Cb[i], cr = Cr[i];
 				int32_t R = yy + ((cr * 91916 + 32768) >> 16);
 				int32_t G = yy - ((cb * 22527 + cr * 46819 + 32768) >> 16);
 				int32_t B = yy + ((cb * 115993 + 32768) >> 16);
-				dst[x] = 0xFF000000u | ((uint32_t)clamp8(R) << 16) | ((uint32_t)clamp8(G) << 8) | clamp8(B);
+				dst[i] = 0xFF000000u | ((uint32_t)clamp8(R) << 16) | ((uint32_t)clamp8(G) << 8) | clamp8(B);
 			}
 		}
 		if (c->on_rect)

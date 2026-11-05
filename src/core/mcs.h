@@ -17,6 +17,8 @@
 
 #define RDP_E_MCS (-120)     /* the server's MCS answer was a refusal; see the result */
 #define RDP_E_LICENSE (-121) /* licensing did not end with STATUS_VALID_CLIENT: lic_type, lic_error say how */
+#define RDP_E_UNVERIFIED (-122) /* the password would go to a server whose certificate was not checked */
+#define RDP_E_REDIRECT (-123)   /* the server redirected the session elsewhere; not followed (not advertised) */
 
 #define RDP_MCS_MAX_CHANNELS 31
 
@@ -74,6 +76,13 @@ struct rdp_pdu
 	const uint8_t* data;
 	size_t len;
 };
+/* How long the PDU at the start of buf is, from the have bytes there: its
+ * length (fast-path or TPKT, header included), 0 when more bytes are
+ * needed to tell, or < 0 when it is not one; RDP_E_SPACE over size. */
+int rdp_pdu_frame_length(const uint8_t* buf, size_t have, size_t size);
+/* One whole PDU of len bytes (rdp_pdu_frame_length) at buf, taken apart
+ * as rdp_pdu_read does */
+int rdp_pdu_parse(uint8_t* buf, size_t len, struct rdp_mcs_result* r, struct rdp_pdu* pdu);
 /* Reads one PDU into buf (size 65536 holds any). 0 (pdu->len 0 for an MCS
  * PDU the session has no use for), AMIPR_ECLOSED after a Disconnect
  * Provider Ultimatum (r->disconnect_reason) or when the connection ends,

@@ -13,6 +13,7 @@
 #include "mcs.h"
 #include "x509.h"
 #include "session.h"
+#include "knownhosts.h"
 
 #include <exec/types.h>
 #include <intuition/intuition.h>
@@ -60,6 +61,11 @@ struct cw
 	olui_el* fav_items[MAX_FAVOURITES];
 	struct session_info* info;
 	int result; /* -1 running, 0 quit, 1 connect */
+	int busy;   /* 1 while a connection is being made (the window still answers) */
+	int cancel; /* Cancel, Esc or Ctrl-C while busy: the connection stops */
+	int pending; /* Connect asked for: done by the main loop, outside the
+	                UI's event dispatch (the window's events are handled
+	                again from inside the connection's waits) */
 };
 
 /* Edit: the program's own clipboard for now (clipboard.device next) */
@@ -115,6 +121,8 @@ static void copy_text(char* dst, size_t size, const char* src)
 
 static void do_save(struct cw* c)
 {
+	if (c->busy)
+		return;
 	const char* host = olui_get_text(c->host);
 	struct favourite f;
 	int i, slot = -1;
@@ -161,6 +169,8 @@ static void do_save(struct cw* c)
 
 static void do_delete(struct cw* c)
 {
+	if (c->busy)
+		return;
 	int i = selected_fav(c);
 
 	if (i < 0)
@@ -202,6 +212,75 @@ static void nla_status(struct cw* c, int rc, const struct rdp_nla_result* r)
 	set_status(c, line);
 }
 
+static const char* cert_reason(int e)
+{
+	switch (e)
+	{
+		case AMIPR_CERT_UNTRUSTED: return "it is not signed by an authority this Amiga trusts (self-signed?)";
+		case AMIPR_CERT_HOSTNAME: return "it is for another name";
+		case AMIPR_CERT_EXPIRED: return "it has expired or is not valid yet";
+		case AMIPR_CERT_BAD: return "it is malformed";
+		case AMIPR_CERT_NOSTORE: return "the trust store (S:GFOpenTLS) is missing";
+		case AMIPR_CERT_PINNED: return "it is not the pinned one";
+		default: return "it could not be checked";
+	}
+}
+
+/* AMIPR_ECERT: the certificate shown, and the user asked whether to trust
+ * it for this computer (trust on first use, as SSH; review H1). 1 when it
+ * was trusted and saved in the known hosts (the caller connects again,
+ * pinning it), 0 not. changed: a certificate was trusted for it before,
+ * and this is another one. */
+static int ask_trust(struct cw* c, const char* host, uint16_t port, struct rdp_transport* t, int changed)
+{
+	uint8_t fp[32];
+	char text[96], fp1[64], cn[128], body[2048];
+	const uint8_t* der;
+	size_t len;
+	struct rdp_x509 x;
+	int match = -1;
+	struct EasyStruct es;
+
+	if (amipr_tls_peer_fingerprint(t->tls, fp) != 0)
+		return 0;
+	cn[0] = 0;
+	if (amipr_tls_peer_certificate(t->tls, &der, &len) == 0 && rdp_x509_parse(&x, der, len) == 0)
+	{
+		if (rdp_x509_common_name(&x, cn, sizeof(cn)) < 0)
+			cn[0] = 0;
+		match = rdp_x509_match_host(&x, host);
+	}
+	rdp_fingerprint_text(fp, text);
+	memcpy(fp1, text, 48);   /* two lines of 16 bytes each */
+	fp1[47] = 0;
+	snprintf(body, sizeof(body),
+	         "%s"
+	         "The certificate of %s cannot be checked:\n%s.\n\n"
+	         "Issued to: %s\n"
+	         "Name matches %s: %s\n\n"
+	         "SHA-256 fingerprint:\n%s\n%s\n\n"
+	         "Compare it with the one the computer's owner gives you.\n"
+	         "Trust this certificate for %s from now on?",
+	         changed ? "WARNING: this is NOT the certificate trusted before for this\n"
+	                   "computer. Someone may be listening in between; do not\n"
+	                   "trust it unless you know it was changed.\n\n" : "",
+	         host, cert_reason(amipr_tls_cert_error(t->tls)), cn[0] ? cn : "(no name)", host,
+	         match < 0 ? "?" : match ? "yes" : "NO", fp1, text + 48, host);
+	memset(&es, 0, sizeof(es));
+	es.es_StructSize = sizeof(es);
+	es.es_Title = (UBYTE*)(changed ? APP_NAME ": certificate changed" : APP_NAME ": certificate");
+	es.es_TextFormat = (UBYTE*)"%s";
+	es.es_GadgetFormat = (UBYTE*)(changed ? "Trust the new one|Cancel" : "Trust|Cancel");
+	if (EasyRequest(c->win, &es, NULL, (ULONG)body) != 1)
+		return 0;
+	if (rdp_known_host_set(host, port, fp) < 0)
+	{
+		set_status(c, "The certificate could not be saved in ENVARC:GFAmigaRDP/KnownHosts.");
+		return 0;
+	}
+	return 1;
+}
+
 /* the real connection's first steps: TCP, the X.224 negotiation, TLS,
  * NLA's logon when the computer chose it, MCS and licensing. On success
  * the connection stays open in info->conn for the session window, which
@@ -213,8 +292,9 @@ static int probe(struct cw* c, struct session_info* info, ULONG protocols, const
 	struct rdp_transport* t = &conn->t;
 	struct rdp_x224_cc cc;
 	char line[160];
-	int rc;
+	int rc, tries = 0;
 
+again:
 	rdp_conn_close(conn);    /* a session before this one */
 	rdp_conn_init(conn);
 	rdp_settings_default(&s);
@@ -239,7 +319,22 @@ static int probe(struct cw* c, struct session_info* info, ULONG protocols, const
 	{
 		set_status(c, "Making a secure connection...");
 		olui_amiga_draw(c->a);
+		/* the certificate trusted before for this computer, if any */
+		t->have_pin = rdp_known_host_get(info->host, s.port, t->pin);
 		rc = rdp_transport_start_tls(t);
+		if (rc == AMIPR_ECERT && !tries++ && !c->cancel)
+		{
+			set_status(c, "The computer's certificate needs your answer.");
+			olui_amiga_draw(c->a);
+			if (ask_trust(c, info->host, s.port, t, t->have_pin))
+			{
+				set_status(c, "Connecting again with the trusted certificate...");
+				olui_amiga_draw(c->a);
+				goto again;
+			}
+			set_status(c, "Not connected: the certificate was not trusted.");
+			goto fail;
+		}
 	}
 	if (rc != 0)
 	{
@@ -319,6 +414,60 @@ fail:
 	return 0;
 }
 
+static void menu_pick(struct cw* c, UWORD code);
+static int shortcut(struct cw* c, UWORD code);
+
+static void request_connect(struct cw* c)
+{
+	if (!c->busy)
+		c->pending = 1;
+}
+
+/* the window's messages that have come */
+static void window_events(struct cw* c)
+{
+	struct IntuiMessage* m;
+	while ((m = (struct IntuiMessage*)GetMsg(c->win->UserPort)))
+	{
+		if (m->Class == IDCMP_MENUPICK)
+		{
+			UWORD code = m->Code;
+			ReplyMsg(&m->ExecMessage);
+			menu_pick(c, code);
+			continue;
+		}
+		if (m->Class == IDCMP_VANILLAKEY &&
+		    !(m->Qualifier & (IEQUALIFIER_LCOMMAND | IEQUALIFIER_RCOMMAND)) &&
+		    shortcut(c, m->Code))
+		{
+			ReplyMsg(&m->ExecMessage);
+			continue;
+		}
+		if (olui_amiga_event(c->a, m) == OLUI_AMIGA_CLOSE)
+		{
+			c->result = 0;
+			if (c->busy)
+				c->cancel = 1;
+		}
+		ReplyMsg(&m->ExecMessage);
+		if (c->result >= 0 && !c->busy)
+			break;
+	}
+	olui_amiga_draw(c->a);
+}
+
+/* the abort hook while connecting: the window's messages handled as they
+ * come (refresh, typing, Cancel), from inside the network waits; nonzero
+ * stops the connection */
+static int busy_events(void* user, uint32_t sigs)
+{
+	struct cw* c = user;
+	if (sigs & SIGBREAKF_CTRL_C)
+		c->cancel = 1;
+	window_events(c);
+	return c->cancel;
+}
+
 /* the password field's text into the caller's buffer, and the field's
  * own copy overwritten and emptied: the password then lives only in pw
  * for the logon, and the caller wipes pw after it (review M4) */
@@ -383,8 +532,17 @@ static void do_connect(struct cw* c)
 		take_password(c, pw, sizeof(pw));
 		olui_amiga_draw(c->a);
 		if (s < 0 || s >= ui_nsecurity) s = 0;
+		/* the window keeps answering while the network is waited for:
+		 * Cancel, Esc, the close gadget or Ctrl-C stop it (review M2) */
+		c->busy = 1;
+		c->cancel = 0;
+		amipr_set_abort((1UL << c->win->UserPort->mp_SigBit) | SIGBREAKF_CTRL_C, busy_events, c);
 		if (probe(c, info, ui_security[s].protocols, pw))
 			c->result = 1;
+		amipr_set_abort(0, NULL, NULL);
+		if (c->cancel && c->result != 1)
+			set_status(c, "Cancelled.");
+		c->busy = 0;
 		wipe(pw, sizeof(pw));
 	}
 }
@@ -393,7 +551,13 @@ static void on_click(olui* ui, const olui_event* ev, void* data)
 {
 	struct cw* c = data;
 	(void)ui;
-	if (!strcmp(ev->id, "connect")) do_connect(c);
+	if (c->busy)
+	{
+		if (!strcmp(ev->id, "cancel"))
+			c->cancel = 1;   /* stops the connection, not the program */
+		return;
+	}
+	if (!strcmp(ev->id, "connect")) request_connect(c);
 	else if (!strcmp(ev->id, "cancel")) c->result = 0;
 	else if (!strcmp(ev->id, "save")) do_save(c);
 	else if (!strcmp(ev->id, "delete")) do_delete(c);
@@ -402,7 +566,7 @@ static void on_click(olui* ui, const olui_event* ev, void* data)
 static void on_submit(olui* ui, const olui_event* ev, void* data)
 {
 	(void)ui; (void)ev;
-	do_connect((struct cw*)data);
+	request_connect((struct cw*)data);
 }
 
 static void on_fav(olui* ui, const olui_event* ev, void* data)
@@ -412,9 +576,11 @@ static void on_fav(olui* ui, const olui_event* ev, void* data)
 	(void)ui;
 	if (i < 0)
 		return;
+	if (c->busy)
+		return;
 	show_fav(c, i);
 	if (ev->type == OLUI_ACTIVATE)
-		do_connect(c);
+		request_connect(c);
 }
 
 static void on_clip(olui* ui, const olui_event* ev, void* data)
@@ -443,9 +609,14 @@ static int shortcut(struct cw* c, UWORD code)
 		if (olui_select_is_open(c->ui, c->res) || olui_select_is_open(c->ui, c->depth) ||
 		    olui_select_is_open(c->ui, c->sec))
 			return 0; /* Esc closes the open list first */
-		c->result = 0;
+		if (c->busy)
+			c->cancel = 1;
+		else
+			c->result = 0;
 		return 1;
 	}
+	if (c->busy)
+		return 0;   /* the fields still edit; the shortcuts wait */
 	if (is_text(c, focus))
 		return 0;
 	switch (ch)
@@ -460,7 +631,7 @@ static int shortcut(struct cw* c, UWORD code)
 		case 'f': olui_focus(c->ui, c->favs); return 1;
 		case 's': do_save(c); return 1;
 		case 'e': do_delete(c); return 1;
-		case 'c': do_connect(c); return 1;
+		case 'c': request_connect(c); return 1;
 		case 'a': c->result = 0; return 1;
 		default: return 0;
 	}
@@ -475,9 +646,20 @@ static void menu_pick(struct cw* c, UWORD code)
 		struct MenuItem* item = ItemAddress(strip, code);
 		if (!item)
 			break;
+		if (c->busy)
+		{
+			/* while connecting: Quit stops it and quits; the rest waits */
+			if ((ULONG)GTMENUITEM_USERDATA(item) == M_QUIT)
+			{
+				c->cancel = 1;
+				c->result = 0;
+			}
+			code = item->NextSelect;
+			continue;
+		}
 		switch ((ULONG)GTMENUITEM_USERDATA(item))
 		{
-			case M_CONNECT: do_connect(c); break;
+			case M_CONNECT: request_connect(c); break;
 			case M_SAVE: do_save(c); break;
 			case M_DELETE: do_delete(c); break;
 			case M_QUIT: c->result = 0; break;
@@ -564,31 +746,17 @@ int connect_window(struct app* app, const char* host, struct session_info* info)
 			{
 				while (c.result < 0)
 				{
-					struct IntuiMessage* m;
 					ULONG sig = Wait((1UL << c.win->UserPort->mp_SigBit) | SIGBREAKF_CTRL_C);
 					if (sig & SIGBREAKF_CTRL_C)
 						c.result = 0;
-					while (c.result < 0 && (m = (struct IntuiMessage*)GetMsg(c.win->UserPort)))
+					if (c.result < 0)
+						window_events(&c);
+					while (c.result < 0 && c.pending)
 					{
-						if (m->Class == IDCMP_MENUPICK)
-						{
-							UWORD code = m->Code;
-							ReplyMsg(&m->ExecMessage);
-							menu_pick(&c, code);
-							continue;
-						}
-						if (m->Class == IDCMP_VANILLAKEY &&
-						    !(m->Qualifier & (IEQUALIFIER_LCOMMAND | IEQUALIFIER_RCOMMAND)) &&
-						    shortcut(&c, m->Code))
-						{
-							ReplyMsg(&m->ExecMessage);
-							continue;
-						}
-						if (olui_amiga_event(c.a, m) == OLUI_AMIGA_CLOSE)
-							c.result = 0;
-						ReplyMsg(&m->ExecMessage);
+						c.pending = 0;
+						do_connect(&c);
+						olui_amiga_draw(c.a);
 					}
-					olui_amiga_draw(c.a);
 				}
 			}
 		}

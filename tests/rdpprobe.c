@@ -17,6 +17,10 @@
  * CHANNELS=drdynvc,cliprdr the static channels offered (default none),
  * EARLY=hex earlyCapabilityFlags (default 0001), DEPTHS=hex
  * supportedColorDepths (default 0007), BPP=8|15|16|24 (default 16).
+ * The certificate must chain to a trusted CA and name the host, or be
+ * the one trusted before (ENVARC:GFAmigaRDP/KnownHosts, shared with
+ * GFAmigaRDP); else RDPProbe prints it and stops, and TRUST saves it
+ * there (after you have compared its fingerprint) and connects again.
  * MIT, Copyright (c) 2026 AmiCradle Team. Written by Sacredtrees (Team 6).
  */
 #include "connect.h"
@@ -25,6 +29,7 @@
 #include "nla.h"
 #include "mcs.h"
 #include "session.h"
+#include "knownhosts.h"
 
 #include <dos/dos.h>
 #include <proto/exec.h>
@@ -35,8 +40,12 @@
 
 static const char version[] = "$VER: RDPProbe 0.2 (04.11.2026) AmiCradle Team";
 
-#define TEMPLATE "HOST/A,PORT/N,USER/K,DOMAIN/K,PASSWORD/K,RDP/S,TLS/S,NLA/S,DUMP/K,ASKPASS/S,ACTIVATE/S,WAIT/N,CHANNELS/K,EARLY/K,DEPTHS/K,BPP/N"
-enum { A_HOST, A_PORT, A_USER, A_DOMAIN, A_PASSWORD, A_RDP, A_TLS, A_NLA, A_DUMP, A_ASKPASS, A_ACTIVATE, A_WAIT, A_CHANNELS, A_EARLY, A_DEPTHS, A_BPP, A_N };
+/* the Shell's 4 KB is not enough for a TLS handshake (16 KB) and NLA:
+ * libnix's startup swaps to this much (review H2) */
+unsigned long __stack = 65536;
+
+#define TEMPLATE "HOST/A,PORT/N,USER/K,DOMAIN/K,PASSWORD/K,RDP/S,TLS/S,NLA/S,DUMP/K,ASKPASS/S,ACTIVATE/S,WAIT/N,CHANNELS/K,EARLY/K,DEPTHS/K,BPP/N,TRUST/S"
+enum { A_HOST, A_PORT, A_USER, A_DOMAIN, A_PASSWORD, A_RDP, A_TLS, A_NLA, A_DUMP, A_ASKPASS, A_ACTIVATE, A_WAIT, A_CHANNELS, A_EARLY, A_DEPTHS, A_BPP, A_TRUST, A_N };
 
 static char pw[256];
 
@@ -270,7 +279,7 @@ int main(void)
 	static struct rdp_conn conn;   /* its transport is the one connection: TLS keeps a pointer to it */
 	struct rdp_transport* t = &conn.t;
 	struct rdp_x224_cc cc;
-	int rc;
+	int rc, retried = 0;
 
 	(void)version;
 	rd = ReadArgs((CONST_STRPTR)TEMPLATE, args, NULL);
@@ -305,6 +314,7 @@ int main(void)
 	else if (args[A_ASKPASS])
 		ask_password();
 
+again:
 	rdp_conn_init(&conn);
 	printf("Connecting to %s, port %u...\n", s.host, (unsigned)s.port);
 	rc = rdp_transport_connect(t, s.host, s.port, s.timeout_us);
@@ -326,8 +336,48 @@ int main(void)
 			       cc.has_neg ? "" : ", with no negotiation data: an old server");
 			if (cc.selected & (RDP_PROTOCOL_SSL | RDP_PROTOCOL_HYBRID | RDP_PROTOCOL_HYBRID_EX))
 			{
+				t->have_pin = rdp_known_host_get(s.host, s.port, t->pin);
 				rc = rdp_transport_start_tls(t);
-				if (rc == 0)
+				if (rc == AMIPR_ECERT)
+				{
+					uint8_t fp[32];
+					char text[96], name[256];
+					const uint8_t* der;
+					size_t len;
+					struct rdp_x509 x;
+					static const char* why[] = { "?", "not signed by a trusted CA (self-signed?)", "for another name",
+					                             "expired or not valid yet", "malformed",
+					                             "the trust store S:GFOpenTLS is missing", "not the pinned one" };
+					int e = amipr_tls_cert_error(t->tls);
+					printf("Certificate: %s%s.\n", t->have_pin ? "CHANGED since it was trusted, and " : "",
+					       why[e >= 0 && e <= 6 ? e : 0]);
+					if (amipr_tls_peer_certificate(t->tls, &der, &len) == 0 && rdp_x509_parse(&x, der, len) == 0)
+					{
+						if (rdp_x509_name_string(x.subject, x.subject_len, name, sizeof(name)) == 0)
+							printf("Subject: %s\n", name);
+						printf("Name matches %s: %s\n", s.host, rdp_x509_match_host(&x, s.host) ? "yes" : "NO");
+					}
+					if (amipr_tls_peer_fingerprint(t->tls, fp) == 0)
+					{
+						rdp_fingerprint_text(fp, text);
+						printf("SHA-256: %s\n", text);
+						if (args[A_TRUST] && !retried)
+						{
+							if (rdp_known_host_set(s.host, s.port, fp) == 0)
+							{
+								printf("Trusted: saved in %s. Connecting again.\n", rdp_known_hosts_path);
+								retried = 1;
+								rdp_conn_close(&conn);
+								goto again;
+							}
+							printf("It could not be saved in %s.\n", rdp_known_hosts_path);
+						}
+						else if (!args[A_TRUST])
+							printf("Compare the fingerprint with the computer's own; TRUST trusts it from now on.\n");
+					}
+					rc = 1;  /* said already */
+				}
+				else if (rc == 0)
 				{
 					const uint8_t* der;
 					size_t len;

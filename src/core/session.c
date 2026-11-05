@@ -9,7 +9,8 @@
 #include <proto/exec.h>
 #include <string.h>
 
-#define CONN_BUF 65536
+#define CONN_BUF 65536   /* what the server sent: a PDU, and the start of the next */
+#define TX_BUF 4096      /* what the client sends from here (Confirm Active and the small ones) */
 
 void rdp_conn_init(struct rdp_conn* c)
 {
@@ -20,7 +21,11 @@ void rdp_conn_init(struct rdp_conn* c)
 static int need_buf(struct rdp_conn* c)
 {
 	if (!c->buf)
-		c->buf = AllocVec(CONN_BUF, MEMF_ANY);
+	{
+		c->buf = AllocVec(CONN_BUF + TX_BUF, MEMF_ANY);
+		c->tx = c->buf ? c->buf + CONN_BUF : NULL;
+		c->have = 0;
+	}
 	return c->buf ? 0 : AMIPR_ENOMEM;
 }
 
@@ -32,7 +37,7 @@ static int send_data(struct rdp_conn* c, uint8_t type2, const uint8_t* payload, 
 	rdp_s_init(&s, pdu, sizeof(pdu));
 	if (rdp_build_data(&s, c->demand.share_id, c->mr.user_channel, type2, payload, len) < 0)
 		return RDP_E_SPACE;
-	return rdp_mcs_send_data(&c->t, c->buf, CONN_BUF, c->mr.user_channel, c->mr.io_channel, pdu, s.pos);
+	return rdp_mcs_send_data(&c->t, c->tx, TX_BUF, c->mr.user_channel, c->mr.io_channel, pdu, s.pos);
 }
 
 static int confirm(struct rdp_conn* c)
@@ -45,7 +50,7 @@ static int confirm(struct rdp_conn* c)
 	rdp_s_init(&s, pdu, sizeof(pdu));
 	if (rdp_build_confirm_active(&s, &c->demand, c->mr.user_channel, w, h, c->depth ? c->depth : 16) < 0)
 		return RDP_E_SPACE;
-	rc = rdp_mcs_send_data(&c->t, c->buf, CONN_BUF, c->mr.user_channel, c->mr.io_channel, pdu, s.pos);
+	rc = rdp_mcs_send_data(&c->t, c->tx, TX_BUF, c->mr.user_channel, c->mr.io_channel, pdu, s.pos);
 	/* 2.2.1.14 to 2.2.1.18: the client sends these straight after it, in this order */
 	if (rc >= 0)
 	{
@@ -72,12 +77,12 @@ static int confirm(struct rdp_conn* c)
 	return rc < 0 ? rc : 0;
 }
 
-/* one PDU read and acted on */
-static int step(struct rdp_conn* c)
+/* the whole PDU of len bytes at the start of c->buf, acted on */
+static int handle(struct rdp_conn* c, size_t len)
 {
 	struct rdp_pdu pdu;
 	struct rdp_share sh;
-	int rc = rdp_pdu_read(&c->t, c->buf, CONN_BUF, &c->mr, &pdu);
+	int rc = rdp_pdu_parse(c->buf, len, &c->mr, &pdu);
 	{
 		unsigned i = c->ntrace++ % 8;
 		const uint8_t* src = pdu.len ? pdu.data : c->buf;   /* the raw TPKT when it carried nothing for the session */
@@ -115,8 +120,11 @@ static int step(struct rdp_conn* c)
 			c->act = RDP_ACT_DEACTIVATED;
 			return 0;
 		case RDP_PDUTYPE_SERVER_REDIR:
+			/* not advertised (mcs.c), so not followed: a server that sends
+			 * one anyway means this session is not where the user is going */
 			c->redirected = 1;
-			return 0;
+			c->act = RDP_ACT_ENDED;
+			return RDP_E_REDIRECT;
 		case RDP_PDUTYPE_DATA:
 			c->last_type2 = sh.type2;
 			if (sh.type2 < 32)
@@ -152,16 +160,73 @@ static int step(struct rdp_conn* c)
 	}
 }
 
+/* The next PDU, if all of it is there, without waiting: what TLS holds
+ * already and what the socket has are read until it would block, and a
+ * PDU is acted on only when all of it has come; the rest waits in c->buf
+ * for the next call (a half PDU never blocks the task; review M4).
+ * 1 when one was acted on, 0 when none is complete yet, or < 0. */
+static int next_pdu(struct rdp_conn* c)
+{
+	for (;;)
+	{
+		int len = rdp_pdu_frame_length(c->buf, c->have, CONN_BUF), n;
+		if (len < 0)
+			return len;
+		if (len > 0 && c->have >= (size_t)len)
+		{
+			int rc = handle(c, (size_t)len);
+			c->have -= (size_t)len;
+			if (c->have)
+				memmove(c->buf, c->buf + len, c->have);
+			return rc < 0 ? rc : 1;
+		}
+		n = rdp_transport_read_some(&c->t, c->buf + c->have, CONN_BUF - c->have);
+		if (n == AMIPR_EAGAIN)
+			return 0;
+		if (n == AMIPR_ECLOSED)
+			c->act = RDP_ACT_ENDED;
+		if (n < 0)
+			return n;
+		c->have += (size_t)n;
+	}
+}
+
+int rdp_conn_ready(const struct rdp_conn* c)
+{
+	int len;
+	if (!c->live || !c->buf)
+		return 0;
+	if (rdp_transport_pending((struct rdp_transport*)&c->t) > 0)
+		return 1;
+	len = rdp_pdu_frame_length(c->buf, c->have, CONN_BUF);
+	return len < 0 || (len > 0 && c->have >= (size_t)len);
+}
+
 int rdp_conn_activate(struct rdp_conn* c, int max_pdus)
 {
-	int rc = need_buf(c), n;
+	int rc = need_buf(c), n = 0;
 	if (rc < 0)
 		return rc;
 	if (!c->live)
 		return AMIPR_ECLOSED;
-	for (n = 0; n < max_pdus && c->act != RDP_ACT_ACTIVE; n++)
+	while (n < max_pdus && c->act != RDP_ACT_ACTIVE)
 	{
-		rc = step(c);
+		struct amipr_wait_item it;
+		rc = next_pdu(c);
+		if (rc < 0)
+			return rc;
+		if (rc > 0)
+		{
+			n++;
+			continue;
+		}
+		/* nothing whole yet: wait for the socket, at most the transport's timeout */
+		it.fd = c->t.sock;
+		it.events = c->t.want ? c->t.want : AMIPR_WAIT_READ;
+		it.revents = 0;
+		rc = amipr_wait(&it, 1, c->t.timeout_us);
+		if (rc == 0)
+			return AMIPR_ETIMEOUT;
 		if (rc < 0)
 			return rc;
 	}
@@ -175,19 +240,9 @@ int rdp_conn_poll(struct rdp_conn* c, int max)
 		return rc;
 	while (c->live && max-- > 0)
 	{
-		struct amipr_wait_item it;
-		if (!c->t.tls || amipr_tls_pending(c->t.tls) <= 0)
-		{
-			it.fd = c->t.sock;
-			it.events = AMIPR_WAIT_READ;
-			it.revents = 0;
-			rc = amipr_wait(&it, 1, 0);
-			if (rc <= 0)
-				return rc;   /* nothing waiting (0), or the wait failed */
-		}
-		rc = step(c);
-		if (rc < 0)
-			return rc;
+		rc = next_pdu(c);
+		if (rc <= 0)
+			return rc;   /* nothing whole waiting (0), or it ended */
 	}
 	return 0;
 }
@@ -202,6 +257,8 @@ void rdp_conn_close(struct rdp_conn* c)
 	{
 		FreeVec(c->buf);
 		c->buf = NULL;
+		c->tx = NULL;
+		c->have = 0;
 	}
 }
 

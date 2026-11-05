@@ -24,9 +24,13 @@ const struct ui_depth ui_depths[] = {
 };
 /* RDP_PROTOCOL_SSL 1, RDP_PROTOCOL_HYBRID 2 (core/x224.h) */
 const struct ui_security ui_security[] = {
-	{ "The best the computer offers", 0x1 | 0x2 | 0x8 },   /* TLS, HYBRID, HYBRID_EX */
-	{ "TLS", 0x1 },
-	{ "Network Level Authentication", 0x2 | 0x8 },         /* HYBRID, HYBRID_EX */
+	/* NLA first and by default: with TLS alone the password goes to the
+	 * computer inside the Client Info PDU, so TLS is offered only when the
+	 * user picks it, and then the certificate must be trusted (review H1).
+	 * The order is the favourites' saved index: 1 stays TLS. */
+	{ "Network Level Authentication (recommended)", 0x2 | 0x8 },   /* HYBRID, HYBRID_EX */
+	{ "TLS only (password sent inside TLS)", 0x1 },
+	{ "NLA, or TLS if the computer has no NLA", 0x1 | 0x2 | 0x8 },
 };
 const int ui_nresolutions = sizeof(ui_resolutions) / sizeof(ui_resolutions[0]);
 const int ui_ndepths = sizeof(ui_depths) / sizeof(ui_depths[0]);

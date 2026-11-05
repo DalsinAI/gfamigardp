@@ -20,7 +20,7 @@ void rdp_transport_init(struct rdp_transport* t)
 	t->timeout_us = 15000000; /* 15 s */
 }
 
-static int wait_sock(struct rdp_transport* t, unsigned what)
+static int wait_sock_for(struct rdp_transport* t, unsigned what, int64_t timeout_us)
 {
 	struct amipr_wait_item it;
 	int rc;
@@ -28,10 +28,23 @@ static int wait_sock(struct rdp_transport* t, unsigned what)
 	it.fd = t->sock;
 	it.events = what;
 	it.revents = 0;
-	rc = amipr_wait(&it, 1, t->timeout_us);
+	rc = amipr_wait(&it, 1, timeout_us);
 	if (rc == 0)
 		return AMIPR_ETIMEOUT;
 	return rc < 0 ? rc : 0;
+}
+
+static int wait_sock(struct rdp_transport* t, unsigned what)
+{
+	return wait_sock_for(t, what, t->timeout_us);
+}
+
+/* what TLS is blocked on: the direction its I/O hook last got EAGAIN in
+ * (waiting for READ|WRITE would return at once on a writable socket and
+ * spin; review M1) */
+static unsigned tls_want(struct rdp_transport* t, unsigned fallback)
+{
+	return t->want ? t->want : fallback;
 }
 
 int rdp_transport_connect(struct rdp_transport* t, const char* host, uint16_t port,
@@ -59,25 +72,45 @@ static int tls_io(void* user, int write, void* buf, int len)
 {
 	/* non-blocking below: gfopentls gets AMIPR_EAGAIN as OTERR_WOULDBLOCK
 	 * and we wait in the loops here */
-	return raw_io((struct rdp_transport*)user, write, buf, len);
+	struct rdp_transport* t = user;
+	int n = raw_io(t, write, buf, len);
+	if (n == AMIPR_EAGAIN)
+		t->want |= write ? AMIPR_WAIT_WRITE : AMIPR_WAIT_READ;
+	return n;
 }
 
 int rdp_transport_start_tls(struct rdp_transport* t)
 {
 	int rc;
+	uint64_t deadline = 0;
 
 	if (t->sock < 0 || t->tls)
 		return RDP_E_ARG;
-	t->tls = amipr_tls_new(t->host, tls_io, t);
+	t->verified = 0;
+	t->tls = amipr_tls_new(t->host, tls_io, t, t->have_pin ? t->pin : NULL);
 	if (!t->tls)
 		return AMIPR_ENOLIB;
+	if (t->timeout_us >= 0)
+		deadline = amipr_monotonic_us() + (uint64_t)t->timeout_us;
 	for (;;)
 	{
+		int64_t left = -1;
+		t->want = 0;
 		rc = amipr_tls_handshake(t->tls);
 		if (rc != AMIPR_EAGAIN)
+		{
+			if (rc == 0)
+				t->verified = amipr_tls_verified(t->tls);
 			return rc;
-		/* it wants bytes or room: either way the socket is the thing to wait on */
-		rc = wait_sock(t, AMIPR_WAIT_READ | AMIPR_WAIT_WRITE);
+		}
+		if (deadline)
+		{
+			uint64_t now = amipr_monotonic_us();
+			if (now >= deadline)
+				return AMIPR_ETIMEOUT;
+			left = (int64_t)(deadline - now);
+		}
+		rc = wait_sock_for(t, tls_want(t, AMIPR_WAIT_READ), left);
 		if (rc < 0)
 			return rc;
 	}
@@ -85,6 +118,7 @@ int rdp_transport_start_tls(struct rdp_transport* t)
 
 static int io_once(struct rdp_transport* t, int write, void* buf, int len)
 {
+	t->want = 0;
 	if (t->tls)
 		return write ? amipr_tls_write(t->tls, buf, len) : amipr_tls_read(t->tls, buf, len);
 	return raw_io(t, write, buf, len);
@@ -100,7 +134,7 @@ int rdp_transport_write(struct rdp_transport* t, const void* buf, size_t len)
 		int n = io_once(t, 1, (void*)p, chunk);
 		if (n == AMIPR_EAGAIN)
 		{
-			int rc = wait_sock(t, t->tls ? AMIPR_WAIT_READ | AMIPR_WAIT_WRITE : AMIPR_WAIT_WRITE);
+			int rc = wait_sock(t, t->tls ? tls_want(t, AMIPR_WAIT_WRITE) : AMIPR_WAIT_WRITE);
 			if (rc < 0)
 				return rc;
 			continue;
@@ -122,7 +156,7 @@ int rdp_transport_read_full(struct rdp_transport* t, void* buf, size_t len)
 		int n = io_once(t, 0, p, len > 0x4000 ? 0x4000 : (int)len);
 		if (n == AMIPR_EAGAIN)
 		{
-			int rc = wait_sock(t, AMIPR_WAIT_READ);
+			int rc = wait_sock(t, t->tls ? tls_want(t, AMIPR_WAIT_READ) : AMIPR_WAIT_READ);
 			if (rc < 0)
 				return rc;
 			continue;
@@ -155,6 +189,22 @@ int rdp_transport_read_tpkt(struct rdp_transport* t, uint8_t* buf, size_t size)
 		return RDP_E_SPACE;
 	rc = rdp_transport_read_full(t, buf + RDP_TPKT_HEADER, (size_t)len - RDP_TPKT_HEADER);
 	return rc < 0 ? rc : len;
+}
+
+int rdp_transport_read_some(struct rdp_transport* t, void* buf, size_t len)
+{
+	int n;
+	if (t->sock < 0)
+		return AMIPR_ECLOSED;
+	n = io_once(t, 0, buf, len > 0x4000 ? 0x4000 : (int)len);
+	if (n == 0)
+		return AMIPR_ECLOSED;
+	return n;
+}
+
+int rdp_transport_pending(struct rdp_transport* t)
+{
+	return t->tls ? amipr_tls_pending(t->tls) : 0;
 }
 
 void rdp_transport_close(struct rdp_transport* t)

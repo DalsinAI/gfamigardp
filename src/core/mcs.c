@@ -256,7 +256,10 @@ static void client_data(struct rdp_stream* s, const struct rdp_settings* set, ui
 	/* TS_UD_CS_CLUSTER */
 	rdp_s_u16le(s, 0xC004);
 	rdp_s_u16le(s, CS_CLUSTER_LEN);
-	rdp_s_u32le(s, 0x0000000D);          /* REDIRECTION_SUPPORTED, REDIRECTION_VERSION4 */
+	/* REDIRECTION_VERSION4 without REDIRECTION_SUPPORTED: the client does
+	 * not follow a Server Redirection PDU (a reconnection elsewhere), so
+	 * it does not say it can (review M5; session.c ends on one) */
+	rdp_s_u32le(s, 0x0000000C);
 	rdp_s_u32le(s, 0);                   /* RedirectedSessionID */
 	/* TS_UD_CS_SEC: the methods of standard RDP security; with TLS/NLA the
 	 * server answers ENCRYPTION_METHOD_NONE (5.4.1) */
@@ -488,6 +491,11 @@ static int send_client_info(struct rdp_transport* t, uint8_t* buf, const struct 
 	static const char* addr = "0.0.0.0";
 	static const char* dir = "C:\\Windows\\System32\\mstscax.dll";
 	int rc;
+	/* the password travels in the clear inside this PDU (5.4.4): only
+	 * through TLS to a server whose certificate was checked or pinned
+	 * (review H1) */
+	if (password && *password && (!t->tls || !t->verified))
+		return RDP_E_UNVERIFIED;
 	tpkt_begin(&s, buf, BUF);
 	rdp_s_u8(&s, MCS_SDRQ << 2);
 	rdp_s_u16be(&s, (uint16_t)(r->user_channel - MCS_BASE_CHANNEL));
@@ -627,16 +635,11 @@ int rdp_mcs_send_data(struct rdp_transport* t, uint8_t* buf, size_t size, uint16
 
 /* one PDU of either kind ([MS-RDPBCGR] 2.2.9.1.2 fast-path, or a TPKT):
  * the first byte's action bits tell them apart (5.3.8, 2.2.9.1.2) */
-int rdp_pdu_read(struct rdp_transport* t, uint8_t* buf, size_t size, struct rdp_mcs_result* r, struct rdp_pdu* pdu)
+int rdp_pdu_frame_length(const uint8_t* buf, size_t have, size_t size)
 {
 	size_t len, head;
-	int rc;
-	memset(pdu, 0, sizeof(*pdu));
-	if (size < 8)
-		return RDP_E_SPACE;
-	rc = rdp_transport_read_full(t, buf, 2);
-	if (rc < 0)
-		return rc;
+	if (have < 2)
+		return 0;
 	if ((buf[0] & 3) == 0)
 	{
 		/* fpOutputHeader, then a length in one or two bytes (2.2.9.1.2) */
@@ -644,65 +647,97 @@ int rdp_pdu_read(struct rdp_transport* t, uint8_t* buf, size_t size, struct rdp_
 		len = buf[1];
 		if (len & 0x80)
 		{
-			rc = rdp_transport_read_full(t, buf + 2, 1);
-			if (rc < 0)
-				return rc;
+			if (have < 3)
+				return 0;
 			len = ((len & 0x7f) << 8) | buf[2];
 			head = 3;
 		}
+		if (len > size)
+			return RDP_E_SPACE;
+		return len < head ? RDP_E_PROTO : (int)len;
+	}
+	if (buf[0] != RDP_TPKT_VERSION)
+		return RDP_E_PROTO;
+	if (have < 4)
+		return 0;
+	len = ((size_t)buf[2] << 8) | buf[3];
+	if (len > size)
+		return RDP_E_SPACE;
+	return len < RDP_TPKT_HEADER + 3 ? RDP_E_PROTO : (int)len;
+}
+
+int rdp_pdu_parse(uint8_t* buf, size_t len, struct rdp_mcs_result* r, struct rdp_pdu* pdu)
+{
+	struct rdp_stream s;
+	unsigned choice;
+	uint8_t b;
+	int rc;
+	memset(pdu, 0, sizeof(*pdu));
+	if (len < 2)
+		return RDP_E_PROTO;
+	if ((buf[0] & 3) == 0)
+	{
+		size_t head = (buf[1] & 0x80) ? 3 : 2;
 		if (buf[0] & 0x80)               /* FASTPATH_OUTPUT_ENCRYPTED: standard RDP security only */
 			return RDP_E_PROTO;
-		if (len < head || len > size)
-			return len > size ? RDP_E_SPACE : RDP_E_PROTO;
-		rc = rdp_transport_read_full(t, buf + head, len - head);
-		if (rc < 0)
-			return rc;
+		if (len < head)
+			return RDP_E_PROTO;
 		pdu->fastpath = 1;
 		pdu->data = buf + head;
 		pdu->len = len - head;
 		return 0;
 	}
-	if (buf[0] != RDP_TPKT_VERSION)
-		return RDP_E_PROTO;
-	rc = rdp_transport_read_full(t, buf + 2, 2);
+	rc = tpkt_data(buf, len, &s);
 	if (rc < 0)
 		return rc;
-	len = ((size_t)buf[2] << 8) | buf[3];
-	if (len < RDP_TPKT_HEADER + 3 || len > size)
-		return len > size ? RDP_E_SPACE : RDP_E_PROTO;
-	rc = rdp_transport_read_full(t, buf + 4, len - 4);
-	if (rc < 0)
-		return rc;
+	b = rdp_s_get_u8(&s);
+	choice = b >> 2;
+	pdu->choice = (uint8_t)choice;
+	pdu->data = buf;
+	pdu->len = 0;
+	if (choice == MCS_DPUM)
 	{
-		struct rdp_stream s;
-		unsigned choice;
-		uint8_t b;
-		rc = tpkt_data(buf, len, &s);
+		uint8_t c = rdp_s_get_u8(&s);
+		r->disconnect_reason = 1 + (((b & 3u) << 1) | (c >> 7));
+		return AMIPR_ECLOSED;
+	}
+	if (choice != MCS_SDIN)
+		return 0;                    /* nothing for the session */
+	rdp_s_skip(&s, 2);               /* initiator */
+	pdu->channel = rdp_s_get_u16be(&s);
+	rdp_s_skip(&s, 1);               /* dataPriority, segmentation */
+	len = per_get_len(&s);
+	if (s.err || len > rdp_s_left(&s))
+		return RDP_E_PROTO;
+	pdu->data = s.p + s.pos;
+	pdu->len = len;
+	return 0;
+}
+
+int rdp_pdu_read(struct rdp_transport* t, uint8_t* buf, size_t size, struct rdp_mcs_result* r, struct rdp_pdu* pdu)
+{
+	size_t have = 0;
+	int len, rc;
+	memset(pdu, 0, sizeof(*pdu));
+	if (size < 8)
+		return RDP_E_SPACE;
+	/* the header a byte at a time until its length is known, then the rest */
+	while ((len = rdp_pdu_frame_length(buf, have, size)) == 0)
+	{
+		rc = rdp_transport_read_full(t, buf + have, have < 2 ? 2 - have : 1);
 		if (rc < 0)
 			return rc;
-		b = rdp_s_get_u8(&s);
-		choice = b >> 2;
-		pdu->choice = (uint8_t)choice;
-		pdu->data = buf;
-		pdu->len = 0;
-		if (choice == MCS_DPUM)
-		{
-			uint8_t c = rdp_s_get_u8(&s);
-			r->disconnect_reason = 1 + (((b & 3u) << 1) | (c >> 7));
-			return AMIPR_ECLOSED;
-		}
-		if (choice != MCS_SDIN)
-			return 0;                    /* nothing for the session */
-		rdp_s_skip(&s, 2);               /* initiator */
-		pdu->channel = rdp_s_get_u16be(&s);
-		rdp_s_skip(&s, 1);               /* dataPriority, segmentation */
-		len = per_get_len(&s);
-		if (s.err || len > rdp_s_left(&s))
-			return RDP_E_PROTO;
-		pdu->data = s.p + s.pos;
-		pdu->len = len;
+		have = have < 2 ? 2 : have + 1;
 	}
-	return 0;
+	if (len < 0)
+		return len;
+	if ((size_t)len > have)
+	{
+		rc = rdp_transport_read_full(t, buf + have, (size_t)len - have);
+		if (rc < 0)
+			return rc;
+	}
+	return rdp_pdu_parse(buf, (size_t)len, r, pdu);
 }
 
 int rdp_mcs_disconnect(struct rdp_transport* t)

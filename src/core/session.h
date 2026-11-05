@@ -44,10 +44,13 @@ struct rdp_conn
 	uint8_t last_type2;
 	uint8_t deactivated_early;   /* 1: Deactivate All came before any Demand Active (1.3.1.3: the
 	                                server means to drop the connection, not re-exchange capabilities) */
-	uint8_t redirected;          /* 1: an Enhanced Security Server Redirection PDU came (2.2.13.3.1);
-	                                following it (a reconnection) is not done yet */
+	uint8_t redirected;          /* 1: an Enhanced Security Server Redirection PDU came (2.2.13.3.1):
+	                                the session ends with RDP_E_REDIRECT; it is not followed, nor
+	                                advertised (TS_UD_CS_CLUSTER) */
 	struct rdp_fp_counts fp;
-	uint8_t* buf;                /* 64 KiB, for one PDU at a time */
+	uint8_t* buf;                /* 64 KiB: what came, a PDU and the start of the next */
+	size_t have;                 /* bytes of it read and not acted on yet */
+	uint8_t* tx;                 /* 4 KiB after it, for what the client sends */
 	/* the last few PDUs read, for RDPProbe's trace */
 	struct
 	{
@@ -66,9 +69,14 @@ void rdp_conn_init(struct rdp_conn* c);
  * transport error, or AMIPR_ECLOSED when the server ended it (c->act
  * RDP_ACT_ENDED, mr.disconnect_reason, error_info). */
 int rdp_conn_activate(struct rdp_conn* c, int max_pdus);
-/* Reads what the server has sent, without waiting: at most max PDUs. 0,
- * or < 0 as above when it ended. */
+/* Reads what the server has sent, without waiting: at most max PDUs, each
+ * acted on only once all of it has come (a half PDU stays for the next
+ * call). 0, or < 0 as above when it ended. Activation goes on here too:
+ * a window that polls sees c->act move to RDP_ACT_ACTIVE. */
 int rdp_conn_poll(struct rdp_conn* c, int max);
+/* 1 when a poll has something without the socket being readable (TLS
+ * holds decrypted bytes, or a whole PDU waits in buf): wait with timeout 0 */
+int rdp_conn_ready(const struct rdp_conn* c);
 /* The Disconnect Provider Ultimatum when it is live, then closes it all. */
 void rdp_conn_close(struct rdp_conn* c);
 

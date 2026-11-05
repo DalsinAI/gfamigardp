@@ -59,6 +59,7 @@
 #define RDP_E_PROTO (-100)   /* the server sent something that is not this PDU */
 #define RDP_E_SPACE (-101)   /* the buffer is too small */
 #define RDP_E_ARG (-102)     /* a bad argument (a cookie with a line break, say) */
+#define RDP_E_DOWNGRADE (-103) /* the server chose a security protocol that was not offered */
 
 /* Builds the Client X.224 Connection Request PDU, TPKT header included.
  * cookie: the user name for "Cookie: mstshash=" (NULL or "": none);

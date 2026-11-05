@@ -29,14 +29,29 @@ src/amiga and src/ui include Amiga headers.
   objects together with WaitSelect, so the UI's signals can wake it.
 - TLS through gfopentls.library, behind amipr_tls (handshake, read, write,
   the peer certificate). The transport gives it an I/O callback over the
-  socket.
+  socket, and waits only for the direction TLS is blocked on (read or
+  write), with one deadline for the whole handshake.
+- The certificate is checked (OTV_FULL: a trusted CA, the dates, the host
+  name) or must be the one the user trusted before for that host:port
+  (ENVARC:GFAmigaRDP/KnownHosts, SHA-256, trust on first use as SSH;
+  src/core/knownhosts.c). A certificate that fails is shown (subject,
+  name match, fingerprint) and the user decides; a changed one is
+  warned about. The Client Info PDU (which holds the password under TLS)
+  is never sent to an unverified server, and the server cannot pick a
+  protocol that was not offered (no silent downgrade). The default offer
+  is NLA only (HYBRID | HYBRID_EX); TLS alone is a choice in the window.
+- The network runs on the window's task: while connecting, every wait
+  also wakes on the window's signal (amipr_set_abort), so the window is
+  redrawn and Cancel/Esc/Ctrl-C stop the connection. The session window
+  waits on the socket and its IDCMP together (amipr_wait_signals) and
+  reads PDUs without blocking: a half PDU waits in the buffer.
 - Everything above reads TPKT packets ([MS-RDPBCGR] 2.2.1.1, T.123) or
   fast-path PDUs (2.2.9.1.2: the first byte's low two bits are 0).
 
 ## Connection ([MS-RDPBCGR] 1.3.1.1)
 
 1. **Connection initiation** (2.2.1.1, 2.2.1.2): X.224 CR with the
-   mstshash cookie and RDP_NEG_REQ (TLS | NLA by default), the CC with
+   mstshash cookie and RDP_NEG_REQ (NLA by default; TLS when chosen), the CC with
    RDP_NEG_RSP or RDP_NEG_FAILURE. *Done.*
 2. **Security upgrade**: TLS straight after the CC (5.4.5.1); for NLA,
    CredSSP over it (below). *TLS done; NLA next.*

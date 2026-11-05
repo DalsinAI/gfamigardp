@@ -184,6 +184,10 @@ static int setup(struct sw* s, olui** ui, olui_amiga** a, const char* markup, co
 	return 1;
 }
 
+/* the whole Capabilities Exchange and finalization, from the end of
+ * licensing to the Font Map */
+#define ACTIVATE_US 60000000ULL
+
 int session_window(struct app* app, const struct session_info* info)
 {
 	struct sw s;
@@ -236,24 +240,52 @@ int session_window(struct app* app, const struct session_info* info)
 	if (ok)
 	{
 		draw_desktop(&s);
+		/* the Capabilities Exchange and the finalization on the connection
+		 * the connection window opened (review B1) go on in the loop below,
+		 * PDU by PDU as they come, so the window answers all the while
+		 * (review M2); they get ACTIVATE_US in all */
+		uint64_t act_deadline = 0;
 		if (s.conn)
 		{
-			/* the Capabilities Exchange and the finalization on the connection
-			 * the connection window opened (review B1): it waits for each PDU,
-			 * at most the transport's timeout */
-			int rc;
 			status(&s, "Starting the session: waiting for Demand Active.");
 			olui_amiga_draw(s.asb);
-			rc = rdp_conn_activate(s.conn, 64);
-			show_session(&s, rc);
-			if (rc < 0 && rc != AMIPR_ETIMEOUT)
-				rdp_conn_close(s.conn);
-			olui_amiga_draw(s.asb);
+			act_deadline = amipr_monotonic_us() + ACTIVATE_US;
 		}
 		while (s.result < 0)
 		{
 			struct IntuiMessage* m;
-			ULONG sig = Wait((1UL << s.win->UserPort->mp_SigBit) | SIGBREAKF_CTRL_C);
+			ULONG winsig = 1UL << s.win->UserPort->mp_SigBit;
+			ULONG sig;
+			if (s.conn && s.conn->live)
+			{
+				/* the socket and the window together: what the computer
+				 * sends is read when it comes, whichever window is active
+				 * (review M3); timeout 0 when TLS holds bytes already or a
+				 * whole PDU waits (review M4) */
+				struct amipr_wait_item it;
+				uint32_t sigs = winsig | SIGBREAKF_CTRL_C;
+				int64_t timeout = -1;
+				int rc;
+				if (rdp_conn_ready(s.conn))
+					timeout = 0;
+				else if (s.conn->act != RDP_ACT_ACTIVE)
+					timeout = 1000000;   /* to see the activation deadline */
+				it.fd = s.conn->t.sock;
+				it.events = AMIPR_WAIT_READ;
+				it.revents = 0;
+				rc = amipr_wait_signals(&it, 1, timeout, &sigs);
+				sig = sigs;
+				if (rc != 0 || timeout == 0)
+					poll_session(&s);
+				if (s.conn->live && s.conn->act != RDP_ACT_ACTIVE && s.conn->act != RDP_ACT_ENDED &&
+				    amipr_monotonic_us() >= act_deadline)
+				{
+					rdp_conn_close(s.conn);
+					status(&s, "The computer did not finish starting the session in time.");
+				}
+			}
+			else
+				sig = Wait(winsig | SIGBREAKF_CTRL_C);
 			if (sig & SIGBREAKF_CTRL_C)
 				s.result = 0;
 			while (s.result < 0 && (m = (struct IntuiMessage*)GetMsg(s.win->UserPort)))
@@ -292,10 +324,7 @@ int session_window(struct app* app, const struct session_info* info)
 					olui_amiga_draw(s.asb);
 					draw_desktop(&s);
 				}
-				else if (cls == IDCMP_INTUITICKS)
-					poll_session(&s);
 			}
-			poll_session(&s);
 			olui_amiga_draw(s.atb);
 			olui_amiga_draw(s.asb);
 		}

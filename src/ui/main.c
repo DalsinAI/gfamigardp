@@ -27,6 +27,11 @@
 
 static const char version[] = "$VER: " APP_NAME " " APP_VERSION " (04.11.2026) AmiCradle Team";
 
+/* libnix's startup swaps to a stack this big when the Shell's is smaller
+ * (4 KB by default): a TLS handshake alone wants 16 KB of it (gfopentls),
+ * NLA and the windows more (review H2) */
+unsigned long __stack = 65536;
+
 
 struct Menu* ui_menus(struct app* app, const struct NewMenu* nm)
 {
@@ -60,8 +65,9 @@ int main(void)
 {
 	LONG args[ARG_COUNT] = { 0 };
 	struct RDArgs* rd;
-	struct app app;
-	struct session_info info;
+	/* not on the stack: the favourites alone are about 15 KB (review H2) */
+	static struct app app;
+	static struct session_info info;
 	int rc = RETURN_OK, go;
 
 	(void)version;

@@ -4,10 +4,13 @@
  *
  * The library does the records and the handshake; the bytes go through
  * an I/O hook to the caller's transport (src/core/transport.c),
- * so no socket is handed to the library. The certificate is not checked
- * here (OTV_NONE): the caller reads the leaf with
- * amipr_tls_peer_certificate() and decides (known hosts, fingerprints,
- * asking the user), as RDP clients do for self-signed servers.
+ * so no socket is handed to the library. The certificate is checked
+ * (OTV_FULL: a chain to a CA in the trust store, its dates, the host
+ * name), or it is the one certificate the caller pinned (its SHA-256):
+ * how a self-signed RDP server the user chose to trust is accepted
+ * (src/core/knownhosts.c). A handshake that fails on the certificate
+ * leaves it readable (amipr_tls_peer_certificate, _fingerprint), so the
+ * caller can show it and ask; it never goes on unverified (review H1).
  */
 #include "amipr_internal.h"
 
@@ -30,6 +33,8 @@ struct amipr_tls
 	uint8_t* cert;
 	size_t cert_len;
 	LONG last;
+	int cert_error;   /* AMIPR_CERT_* of the last handshake */
+	int verified;     /* 1: handshake done, certificate passed */
 };
 
 static ULONG io_hook(struct Hook* hook, struct OTConnection* conn, struct OTIOMessage* msg)
@@ -50,7 +55,7 @@ const char* amipr_tls_backend_name(void)
 	return "gfopentls.library";
 }
 
-struct amipr_tls* amipr_tls_new(const char* sni_host, amipr_tls_io io, void* user)
+struct amipr_tls* amipr_tls_new(const char* sni_host, amipr_tls_io io, void* user, const uint8_t* pin_sha256)
 {
 	struct OTContextConfig cfg;
 	struct amipr_tls* t;
@@ -69,14 +74,17 @@ struct amipr_tls* amipr_tls_new(const char* sni_host, amipr_tls_io io, void* use
 
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.Size = sizeof(cfg);
-	/* the trust store is not consulted with OTV_NONE: skip reading it */
-	cfg.Flags = OTCF_NO_SYSTEM_TRUST;
+	/* the system trust store (S:GFOpenTLS/ca-bundle.pem) for servers with a
+	 * CA's certificate; a missing store is OTERR_TRUSTSTORE at the
+	 * handshake, a certificate error the caller can still ask about */
+	cfg.Flags = 0;
 	cfg.MinVersion = OT_TLS12;
 	t->ctx = OT_NewContext(&cfg, &err);
 	if (t->ctx)
 		t->conn = OT_NewConnection(t->ctx, (CONST_STRPTR)(sni_host ? sni_host : ""), &err);
 	if (!t->conn || OT_SetIOHook(t->conn, &t->hook) != OTERR_OK ||
-	    OT_SetVerify(t->conn, OTV_NONE) != OTERR_OK)
+	    OT_SetVerify(t->conn, OTV_FULL) != OTERR_OK ||
+	    (pin_sha256 && OT_PinCertificate(t->conn, (CONST UBYTE*)pin_sha256) != OTERR_OK))
 	{
 		amipr_tls_free(t);
 		return NULL;
@@ -110,9 +118,45 @@ static int map(struct amipr_tls* t, LONG r)
 
 int amipr_tls_handshake(struct amipr_tls* t)
 {
+	LONG r;
 	if (!t)
 		return AMIPR_EINVAL;
-	return map(t, OT_Handshake(t->conn));
+	r = OT_Handshake(t->conn);
+	t->cert_error = 0;
+	switch (r)
+	{
+		case OTERR_OK: t->verified = 1; break;
+		case OTERR_UNTRUSTED: t->cert_error = AMIPR_CERT_UNTRUSTED; break;
+		case OTERR_HOSTNAME: t->cert_error = AMIPR_CERT_HOSTNAME; break;
+		case OTERR_EXPIRED: t->cert_error = AMIPR_CERT_EXPIRED; break;
+		case OTERR_BADCERT: t->cert_error = AMIPR_CERT_BAD; break;
+		case OTERR_TRUSTSTORE: t->cert_error = AMIPR_CERT_NOSTORE; break;
+		case OTERR_PINNED: t->cert_error = AMIPR_CERT_PINNED; break;
+		default: break;
+	}
+	if (t->cert_error)
+	{
+		t->last = r;
+		return AMIPR_ECERT;
+	}
+	return map(t, r);
+}
+
+int amipr_tls_cert_error(struct amipr_tls* t)
+{
+	return t ? t->cert_error : 0;
+}
+
+int amipr_tls_verified(struct amipr_tls* t)
+{
+	return t ? t->verified : 0;
+}
+
+int amipr_tls_peer_fingerprint(struct amipr_tls* t, uint8_t out[32])
+{
+	if (!t || !out)
+		return AMIPR_EINVAL;
+	return OT_GetPeerFingerprint(t->conn, (UBYTE*)out) == OTERR_OK ? AMIPR_OK : AMIPR_ETLS;
 }
 
 int amipr_tls_read(struct amipr_tls* t, void* buf, int len)

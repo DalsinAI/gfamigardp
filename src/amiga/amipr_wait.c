@@ -308,7 +308,25 @@ static int fd_kind(int fd, int* sock)
 	return 0;
 }
 
-int amipr_wait(struct amipr_wait_item* items, size_t count, int64_t timeout_us)
+/* the task's abort hook (amipr_set_abort): one per program, used only
+ * from the task that set it */
+static ULONG s_abort_sigs;
+static amipr_abort_cb s_abort_cb;
+static void* s_abort_user;
+static struct Task* s_abort_task;
+static int s_in_abort;
+
+void amipr_set_abort(uint32_t sigmask, amipr_abort_cb cb, void* user)
+{
+	s_abort_sigs = cb ? (ULONG)sigmask : 0;
+	s_abort_cb = cb;
+	s_abort_user = user;
+	s_abort_task = cb ? FindTask(NULL) : NULL;
+}
+
+/* extra: signals to wake on as well; *got: those that came (NULL: the
+ * abort hook's, which are not handed back but given to the hook) */
+static int wait_impl(struct amipr_wait_item* items, size_t count, int64_t timeout_us, ULONG extra, ULONG* got)
 {
 	struct amipr_waiter stack_nodes[MAX_STACK_ITEMS];
 	struct amipr_waiter* nodes = stack_nodes;
@@ -332,6 +350,9 @@ int amipr_wait(struct amipr_wait_item* items, size_t count, int64_t timeout_us)
 	for (;;)
 	{
 		const ULONG wake = 1UL << r->wake_sig;
+		ULONG abort_sigs = (!got && s_abort_cb && !s_in_abort && s_abort_task == FindTask(NULL)) ? s_abort_sigs : 0;
+		ULONG others = (extra | abort_sigs) & ~wake;
+		ULONG came = 0;
 		uint64_t now, wake_at = deadline;
 		fd_set rset, wset;
 		int maxsock = -1;
@@ -399,7 +420,7 @@ int amipr_wait(struct amipr_wait_item* items, size_t count, int64_t timeout_us)
 			if (maxsock >= 0)
 			{
 				struct timeval tv;
-				ULONG sigs = wake;
+				ULONG sigs = wake | others;
 				LONG n;
 				if (!sleep || (wake_at && wake_at <= now))
 				{
@@ -414,6 +435,7 @@ int amipr_wait(struct amipr_wait_item* items, size_t count, int64_t timeout_us)
 				}
 				n = __WaitSelect_base(SocketBase, maxsock + 1, &rset, &wset, NULL,
 				                      (sleep && !wake_at) ? NULL : &tv, &sigs);
+				came = sigs & others;
 				if (n < 0)
 					rc = AMIPR_EINVAL;
 				else if (n > 0)
@@ -442,14 +464,16 @@ int amipr_wait(struct amipr_wait_item* items, size_t count, int64_t timeout_us)
 					r->tr->tr_time.tv_secs = (ULONG)(d / 1000000ULL);
 					r->tr->tr_time.tv_micro = (ULONG)(d % 1000000ULL);
 					SendIO((struct IORequest*)r->tr);
-					Wait(wake | tsig);
+					came = Wait(wake | tsig | others) & others;
 					if (!CheckIO((struct IORequest*)r->tr))
 						AbortIO((struct IORequest*)r->tr);
 					WaitIO((struct IORequest*)r->tr);
 				}
 				else
-					Wait(wake);
+					came = Wait(wake | others) & others;
 			}
+			else if (others && got)
+				came = SetSignal(0, others) & others;   /* nothing to sleep for: a look only */
 		}
 
 		if (linked)
@@ -462,7 +486,30 @@ int amipr_wait(struct amipr_wait_item* items, size_t count, int64_t timeout_us)
 		}
 
 		if (rc < 0 || ready > 0)
+		{
+			if (got)
+				*got |= came;
+			else if (came & abort_sigs)
+				SetSignal(came & abort_sigs, came & abort_sigs);   /* kept for the next wait */
 			break;
+		}
+		if (came && got)
+		{
+			*got |= came;
+			break;               /* one of the caller's signals: rc 0, *got says which */
+		}
+		if (came & abort_sigs)
+		{
+			int stop;
+			s_in_abort = 1;
+			stop = s_abort_cb(s_abort_user, (uint32_t)(came & abort_sigs));
+			s_in_abort = 0;
+			if (stop)
+			{
+				rc = AMIPR_ECANCEL;
+				break;
+			}
+		}
 		if (deadline && amipr_monotonic_us() >= deadline)
 			break; /* rc stays 0: timeout */
 		/* woken by a signal or a due time: look again */
@@ -476,5 +523,21 @@ int amipr_wait(struct amipr_wait_item* items, size_t count, int64_t timeout_us)
 	for (i = 0; i < count; i++)
 		if (items[i].revents)
 			rc++;
+	return rc;
+}
+
+int amipr_wait(struct amipr_wait_item* items, size_t count, int64_t timeout_us)
+{
+	return wait_impl(items, count, timeout_us, 0, NULL);
+}
+
+int amipr_wait_signals(struct amipr_wait_item* items, size_t count, int64_t timeout_us, uint32_t* sigs)
+{
+	ULONG got = 0;
+	int rc;
+	if (!sigs)
+		return wait_impl(items, count, timeout_us, 0, NULL);
+	rc = wait_impl(items, count, timeout_us, (ULONG)*sigs, &got);
+	*sigs = (uint32_t)got;
 	return rc;
 }

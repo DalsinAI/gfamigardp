@@ -12,10 +12,13 @@ void rdp_settings_default(struct rdp_settings* s)
 {
 	memset(s, 0, sizeof(*s));
 	s->port = 3389;
-	/* HYBRID_EX too ([MS-RDPBCGR] 2.2.1.1.1): a server that has it (Windows
-	 * 8 / 2012 on) then says "access denied" before the session starts, in
-	 * the Early User Authorization Result, rather than after (nla.c reads it) */
-	s->protocols = RDP_PROTOCOL_SSL | RDP_PROTOCOL_HYBRID | RDP_PROTOCOL_HYBRID_EX;
+	/* NLA only by default: with TLS alone the password goes inside the
+	 * Client Info PDU, so it is offered only when the user picks it (and
+	 * then the certificate must check out; review H1). HYBRID_EX too
+	 * ([MS-RDPBCGR] 2.2.1.1.1): a server that has it (Windows 8 / 2012 on)
+	 * then says "access denied" before the session starts, in the Early
+	 * User Authorization Result, rather than after (nla.c reads it) */
+	s->protocols = RDP_PROTOCOL_HYBRID | RDP_PROTOCOL_HYBRID_EX;
 	s->width = 800;
 	s->height = 600;
 	s->depth = 16;
@@ -36,7 +39,12 @@ int rdp_negotiate(struct rdp_transport* t, const struct rdp_settings* s, struct 
 	len = rdp_transport_read_tpkt(t, buf, sizeof(buf));
 	if (len < 0)
 		return len;
-	return rdp_x224_parse_cc(buf, (size_t)len, cc);
+	rc = rdp_x224_parse_cc(buf, (size_t)len, cc);
+	/* no silent downgrade: a protocol the client did not offer (TLS when
+	 * only NLA was) is refused, not followed */
+	if (rc == 0 && !(cc->has_neg && cc->neg_type == RDP_NEG_FAILURE) && (cc->selected & ~s->protocols))
+		return RDP_E_DOWNGRADE;
+	return rc;
 }
 
 const char* rdp_error_text(int rc)
@@ -50,10 +58,15 @@ const char* rdp_error_text(int rc)
 		case AMIPR_ENET: return "The network refused the connection.";
 		case AMIPR_ECLOSED: return "The computer closed the connection.";
 		case AMIPR_ETLS: return "The secure connection could not be made.";
+		case AMIPR_ECERT: return "The computer's certificate is not one this Amiga trusts.";
+		case AMIPR_ECANCEL: return "Cancelled.";
+		case RDP_E_UNVERIFIED: return "The password was not sent: the computer's certificate was not checked.";
+		case RDP_E_REDIRECT: return "The computer redirected the session to another one, which this version does not follow.";
 		case AMIPR_ENOMEM: return "Not enough memory.";
 		case RDP_E_PROTO: return "The computer's answer was not RDP.";
 		case RDP_E_SPACE: return "The computer's answer was too long.";
 		case RDP_E_ARG: return "A setting is not valid.";
+		case RDP_E_DOWNGRADE: return "The computer chose a weaker security than was asked for; not connected.";
 		case RDP_E_MCS: return "The computer refused an MCS step.";
 		case RDP_E_LICENSE: return "The computer asked for a licence exchange, which this version does not do yet.";
 		default: return "The connection failed.";

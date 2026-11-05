@@ -34,6 +34,8 @@ extern "C" {
 #define AMIPR_ECLOSED (-10)
 #define AMIPR_ENET (-11)      /* a socket call failed; amipr_net_error() says why */
 #define AMIPR_ENOTFOUND (-12) /* the host name is not known */
+#define AMIPR_ECERT (-13)     /* the server's certificate is not trusted: amipr_tls_cert_error() says why */
+#define AMIPR_ECANCEL (-14)   /* the abort hook (amipr_set_abort) said stop */
 
 /* ---- process lifetime -------------------------------------------------- */
 int amipr_init(void);              /* idempotent; every call below also does it lazily */
@@ -77,6 +79,19 @@ struct amipr_wait_item
 /* timeout_us < 0: no timeout. Answers the number of ready items, 0 on
  * timeout, or < 0. Never consumes a wobj (use amipr_wobj_take). */
 int amipr_wait(struct amipr_wait_item* items, size_t count, int64_t timeout_us);
+/* As amipr_wait, and it returns as well when one of the exec signals in
+ * *sigs comes (a window's IDCMP port, Ctrl-C): then *sigs holds those that
+ * came (they are cleared), else 0. Answers the ready items, 0 (timeout or
+ * a signal), or < 0. The abort hook is not called here. */
+int amipr_wait_signals(struct amipr_wait_item* items, size_t count, int64_t timeout_us, uint32_t* sigs);
+/* The abort hook: while it is set, every amipr_wait of the task that set
+ * it (the TCP connect, TLS, every network wait) wakes on the signals in
+ * sigmask as well and calls cb with those that came; cb may handle the
+ * window's messages (it must not do network I/O itself) and answers
+ * nonzero to stop: the wait then answers AMIPR_ECANCEL. cb NULL clears
+ * it. So a long connection can be cancelled from its window. */
+typedef int (*amipr_abort_cb)(void* user, uint32_t sigs);
+void amipr_set_abort(uint32_t sigmask, amipr_abort_cb cb, void* user);
 
 /* ---- atomics: exec Disable()/Enable(), safe against tasks and interrupts */
 int32_t amipr_atomic_add(volatile int32_t* p, int32_t v);          /* answers the new value */
@@ -188,7 +203,12 @@ struct amipr_tls;
 /* I/O below the TLS layer: answer bytes moved (> 0), 0 at end of stream,
  * AMIPR_EAGAIN, or another negative value for an error. */
 typedef int (*amipr_tls_io)(void* user, int write, void* buf, int len);
-struct amipr_tls* amipr_tls_new(const char* sni_host, amipr_tls_io io, void* user);
+/* The certificate is checked (gfopentls OTV_FULL: a chain to a trusted CA,
+ * its dates and the host name), unless it is the one pinned (pin_sha256,
+ * the SHA-256 of its DER, 32 bytes, or NULL): a server the user chose to
+ * trust (known hosts). A handshake that fails on the certificate answers
+ * AMIPR_ECERT, and the certificate can still be read, to show it. */
+struct amipr_tls* amipr_tls_new(const char* sni_host, amipr_tls_io io, void* user, const uint8_t* pin_sha256);
 void amipr_tls_free(struct amipr_tls* t);
 int amipr_tls_handshake(struct amipr_tls* t);       /* 0, AMIPR_EAGAIN, or AMIPR_ETLS */
 int amipr_tls_read(struct amipr_tls* t, void* buf, int len);
@@ -197,6 +217,19 @@ int amipr_tls_pending(struct amipr_tls* t);
 int amipr_tls_close(struct amipr_tls* t);
 /* the server's leaf certificate, DER, valid until amipr_tls_free */
 int amipr_tls_peer_certificate(struct amipr_tls* t, const uint8_t** der, size_t* len);
+/* SHA-256 of the server's certificate (after the handshake, or one that
+ * failed with AMIPR_ECERT) */
+int amipr_tls_peer_fingerprint(struct amipr_tls* t, uint8_t out[32]);
+/* why the last handshake failed on the certificate: AMIPR_CERT_* (0 none) */
+#define AMIPR_CERT_UNTRUSTED 1   /* no chain to a trusted CA (a self-signed RDP server) */
+#define AMIPR_CERT_HOSTNAME 2    /* not for this host */
+#define AMIPR_CERT_EXPIRED 3
+#define AMIPR_CERT_BAD 4         /* malformed, bad signature, unsupported key */
+#define AMIPR_CERT_NOSTORE 5     /* no trust store (S:GFOpenTLS/ca-bundle.pem) to check it with */
+#define AMIPR_CERT_PINNED 6      /* not the pinned certificate */
+int amipr_tls_cert_error(struct amipr_tls* t);
+/* 1: the handshake is done and the certificate passed (a CA or the pin) */
+int amipr_tls_verified(struct amipr_tls* t);
 const char* amipr_tls_error_text(struct amipr_tls* t);
 const char* amipr_tls_cipher(struct amipr_tls* t);
 int amipr_tls_protocol(struct amipr_tls* t);         /* 0x0303 TLS 1.2, 0x0304 TLS 1.3 */

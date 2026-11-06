@@ -420,6 +420,7 @@ struct ctx
 	int32_t* tmp;              /* RDP_PROG_TMP */
 	int32_t* ycc;              /* 3 x 4096 */
 	uint8_t have_clip;
+	uint8_t revived;               /* tile_state gave a trimmed tile new (zero) coefs */
 	uint16_t cx0, cy0, cx1, cy1;   /* exclusive view clip in surface coords */
 };
 
@@ -452,6 +453,22 @@ static struct rdp_prog_tile* tile_state(struct ctx* c, uint16_t xi, uint16_t yi,
 	if (xi >= ps->gw || yi >= ps->gh)
 		return NULL;
 	slot = &ps->tiles[(size_t)yi * ps->gw + xi];
+	c->revived = 0;
+	/* A tile rdp_progressive_trim emptied (off the view, coefs freed, pixels
+	 * kept) has no coefs: without make it isn't usable; with make it gets new
+	 * zero coefs. Before, it came back with coef NULL and first_pass wrote
+	 * 3 x 4096 int16 through it: address 0 up, the 68k's vectors and exec's
+	 * low memory, and the Amiga froze in its next interrupt (6 Nov 2026,
+	 * GFAmigaRDP against GNOME Remote Desktop, after a pan or the first view). */
+	if (*slot && !(*slot)->coef)
+	{
+		if (!make)
+			return NULL;
+		if (!((*slot)->coef = (int16_t*)rdp_mem_alloc(c->mem, 3 * RDP_PROG_COEFS * sizeof(int16_t))))
+			return NULL;
+		memset((*slot)->coef, 0, 3 * RDP_PROG_COEFS * sizeof(int16_t));
+		c->revived = 1;
+	}
 	if (!*slot && make)
 	{
 		struct rdp_prog_tile* t = (struct rdp_prog_tile*)rdp_mem_alloc(c->mem, sizeof(*t));
@@ -636,6 +653,20 @@ static int first_pass(struct ctx* c, const struct region* rg, const uint8_t* p, 
 	/* Keep state when a view clip is set so off-screen tiles can be painted
 	 * after a pan without waiting for the server to send them again. */
 	t = tile_state(c, xi, yi, c->diffing || progressive || diff || c->have_clip, progressive);
+	if (t && diff && c->revived)
+	{
+		/* a difference on coefs trim dropped can't be applied: back to the
+		 * trimmed state (its pixels stay); the next full tile repairs it */
+		rdp_mem_free(c->mem, t->coef);
+		t->coef = NULL;
+		if (t->sign)
+		{
+			rdp_mem_free(c->mem, t->sign);
+			t->sign = NULL;
+		}
+		c->st->skipped++;
+		return 0;
+	}
 	if (!t)
 	{
 		if (diff || progressive || c->have_clip || xi >= (c->w + 63) / 64 || yi >= (c->h + 63) / 64)

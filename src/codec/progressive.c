@@ -994,6 +994,14 @@ int rdp_progressive_paint(struct rdp_prog_surface* ps, const struct rdp_mem* mem
 			{
 				st->painted++;
 				n++;
+				/* render writes only the part inside the paint window. A tile
+				 * the window doesn't wholly cover (within the surface) stays
+				 * unpainted, so a later paint of the rest renders it again;
+				 * marking it painted left the rest stale. */
+				if ((int32_t)xi * 64 < (int32_t)x0 || (int32_t)yi * 64 < (int32_t)y0 ||
+				    ((int32_t)xi * 64 + 64 < (int32_t)w ? (int32_t)xi * 64 + 64 : (int32_t)w) > (int32_t)x1 ||
+				    ((int32_t)yi * 64 + 64 < (int32_t)h ? (int32_t)yi * 64 + 64 : (int32_t)h) > (int32_t)y1)
+					tile->painted = 0;
 			}
 		}
 	rdp_mem_free(mem, buf);

@@ -777,6 +777,75 @@ static void test_pan_paint_after_clip(void)
 	printf("  view-clip then pan-paint vs no-clip: %d/%d seeds pixel-exact\n", tot - bad, tot);
 }
 
+/* Incremental pan: a view clip that skips most tiles, then paint in pieces
+ * whose edges are not on tile edges (left half, right half; then top/bottom),
+ * against one paint of the whole surface after the same decode. paint() used
+ * to write an edge tile only inside its window and still mark it painted, so
+ * the second piece skipped it and left stale pixels. */
+static void test_incremental_paint(void)
+{
+	static uint8_t frame[400000];
+	enum { GW = 3, GH = 2, W = GW * 64 - 17, H = GH * 64 - 9 };
+	struct rdp_prog_clip clip = { 0, 0, 30, 20 };
+	int seed, way, bad = 0, tot = 0, worst = 0;
+	for (way = 0; way < 2; way++)
+		for (seed = 0; seed < 20; seed++)
+		{
+			struct rdp_prog_surface ps[2];
+			uint32_t* px[2];
+			int pass, f, i, tx[6], ty[6], diff = 0;
+			rng = (uint32_t)(seed * 104729 + 3);
+			for (pass = 0; pass < 2; pass++)
+			{
+				memset(&ps[pass], 0, sizeof(ps[pass]));
+				px[pass] = calloc((size_t)W * H, 4);
+			}
+			for (f = 0; f < 4; f++)
+			{
+				int kind = f == 0 ? 0 : f < 2 ? 1 : 2, n = 0;
+				size_t len;
+				for (i = 0; i < GW * GH; i++)
+				{
+					tx[n] = i % GW;
+					ty[n] = i / GW;
+					n++;
+				}
+				len = make_region(frame, seed & 1, kind, GW, GH, n, tx, ty, 0);
+				rdp_progressive_decode(&ps[0], NULL, frame, len, px[0], W, H, NULL, NULL, NULL, &clip);
+				rdp_progressive_decode(&ps[1], NULL, frame, len, px[1], W, H, NULL, NULL, NULL, &clip);
+			}
+			rdp_progressive_paint(&ps[0], NULL, px[0], W, H, 0, 0, W, H, NULL, NULL, NULL);
+			if (way == 0)
+			{
+				rdp_progressive_paint(&ps[1], NULL, px[1], W, H, 0, 0, W / 2, H, NULL, NULL, NULL);
+				rdp_progressive_paint(&ps[1], NULL, px[1], W, H, W / 2, 0, W, H, NULL, NULL, NULL);
+			}
+			else
+			{
+				rdp_progressive_paint(&ps[1], NULL, px[1], W, H, 0, 0, W, H / 2 + 3, NULL, NULL, NULL);
+				rdp_progressive_paint(&ps[1], NULL, px[1], W, H, 0, H / 2 + 3, W, H, NULL, NULL, NULL);
+			}
+			for (i = 0; i < W * H; i++)
+				diff += px[0][i] != px[1][i];
+			tot++;
+			if (diff)
+			{
+				bad++;
+				if (diff > worst)
+					worst = diff;
+				if (bad <= 3)
+					CHECK(0, "incremental paint (%s) seed %d: %d px stale", way ? "top/bottom" : "left/right", seed, diff);
+			}
+			for (pass = 0; pass < 2; pass++)
+			{
+				rdp_progressive_free(&ps[pass], NULL);
+				free(px[pass]);
+			}
+		}
+	CHECK(bad == 0, "incremental paint: %d/%d differ (worst %d px)", bad, tot, worst);
+	printf("  view-clip then paint in two pieces vs one whole paint: %d/%d pixel-exact\n", tot - bad, tot);
+}
+
 int main(int argc, char** argv)
 {
 	int seeds = argc > 1 ? atoi(argv[1]) : 40, s, tiles = 0;
@@ -797,5 +866,6 @@ int main(int argc, char** argv)
 	test_clipped_skip();
 	printf("pan / paint:\n");
 	test_pan_paint_after_clip();
+	test_incremental_paint();
 	return fails != 0;
 }

@@ -36,23 +36,25 @@ ONGPU gate (skeptic claim 1)
 
 CPU fallback (after ONGPU install)
 - gfopengpu.library missing, or Query NONE / no ONGPU: accel not installed.
-- A Submit/Wait error other than OGPU_ERR_DATA: that hook returns 0 and the
-  step is redone on the CPU in-tree (stats.cpu_fallback counts it).
-- OGPU_ERR_DATA from RLGR_DEC = RDP_PROG_E_PROTO, as the CPU decoder says.
-  Kept for drivers, but the 0.27 core can't answer it for <= 4096 coefs:
-  RLGR reads zeros past the end and gives up only 64 bits past it, and the
-  zero runs finish a component within 62 bits (worst case: k = 0, kr = 10 at
-  the end; a search found exactly 62). rdp_rlgr1_decode has the same bound,
-  so a truncated component decodes (zero-padded) on both paths.
+- A Submit/Wait error, including OGPU_ERR_DATA from RLGR_DEC: the hook
+  returns 0 and the step is redone on the CPU in-tree (stats.cpu_fallback).
+  The in-tree decoder is the authority on stream validity — a future ONGPU
+  driver that answers ERR_DATA for a short RLGR stream must not abort the
+  session when the CPU path would accept it.
+- The 0.27 core can't answer ERR_DATA for <= 4096 coefs: RLGR reads zeros
+  past the end and gives up only 64 bits past it, and the zero runs finish
+  a component within 62 bits (worst case: k = 0, kr = 10 at the end; a
+  search found exactly 62). rdp_rlgr1_decode has the same bound, so a
+  truncated component decodes (zero-padded) on both paths.
 
 Lab-only force (skeptic pass 2, claim 1 leftover)
 - SetEnv GFAmigaRDP/OGPUProgForce 1 (lab / debug only): rdp_ogpu_prog_install
   also arms the hooks when Query answers FULL/PARTIAL without ONGPU, i.e. on
   the library's CPU core, so a bare Cradle runs ogpu_prog.c's stream
-  building and address maths against the real core. Off unless the
-  variable is exactly "1". session_win.c writes "ogpu_prog=N" to
-  T:gfa-session (bit 0 RLGR, bit 1 TILE+YCBCR, bit 2 force on). Never for
-  user machines: Submit overhead, no speed-up.
+  building and address maths against the real core. Trailing whitespace /
+  newline from `echo 1 > ENV:...` is accepted. session_win.c writes
+  "ogpu_prog=N" to T:gfa-session (bit 0 RLGR, bit 1 TILE+YCBCR, bit 2 force
+  on). Never for user machines: Submit overhead, no speed-up.
 
 Bit-exactness / tests
 - gfopenrtg tests/test_rfx.c: ops vs progressive.c kernels (copied), random.
@@ -89,8 +91,9 @@ Not yet
 - No live Windows / GNOME RD pixel capture through the new path yet.
 - No 68040 timings of Submit-vs-in-tree (gated off until ONGPU).
 
-Pins: gfopensdk 007965a (main: squash of gfopensdk #44, gfopengpu 0.27 /
-stream.h v1.10 gathered from gfopenrtg main 5af78d8, squash of gfopenrtg #177).
+Pins: gfopensdk b1c8ed7 (team6/stream-rlgr-errdata-doc, PR #49; gathers
+gfopenrtg 97b82ad stream.h RLGR_DEC ERR_DATA wording). Prior merge pin was
+007965a / gfopenrtg 5af78d8.
 
 Amiga build (skeptic claim 1 / Amiga proof)
 - stove os32-gcc16 job j20261105T205953-beb8c2 at 48bd420: green.
@@ -107,3 +110,13 @@ Amiga build (skeptic claim 1 / Amiga proof)
   sha256 764954d7…); gfopenrtg main 5af78d8 library/opengpu job
   j20261105T214248-23f56f: green, gfopengpu.library byte-identical (260604
   bytes, sha256 b19c191d…). Lab gfamigardp-ui already carries both.
+
+Bugfix (post-merge, 2026-11-05)
+- M1: RLGR_DEC OGPU_ERR_DATA from a driver -> CPU fallback (not PROTO).
+  stream.h wording synced (zeros past end; ERR_DATA only >64 bits past).
+- M2: view clip is tile-level only again (STATUS-pan-opt). render() no
+  longer further clips stream rects to the view — that left edge tiles
+  half-drawn with painted set, so pan/paint skipped the rest (was 40/40
+  seeds × 9125 px stale outside the clip).
+- Nits: test core_run clears C.fence; OGPUProgForce trims whitespace.
+- Host: tools/test_prog_ogpu.sh 40 + ERR_DATA fallback + pan-paint regression.

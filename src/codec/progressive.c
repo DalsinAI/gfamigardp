@@ -485,19 +485,25 @@ static int tile_in_clip(const struct ctx* c, uint16_t xi, uint16_t yi)
 
 /* Dequantize, inverse DWT, colour convert and write the tile, clipped to
  * the stream's rectangles and the surface. Skips the heavy path when the
- * tile lies outside the view clip (coefs stay; paint brings them back). */
+ * whole tile lies outside the view clip (coefs stay; paint brings them
+ * back). Stream rects are not further clipped to the view: a half-drawn
+ * edge tile with painted set made pan/paint skip the rest. */
 static void render(struct ctx* c, struct rdp_prog_tile* t, uint16_t xi, uint16_t yi)
 {
 	int comp, b, i, r, n = 0;
 	int32_t tx = (int32_t)xi * 64, ty = (int32_t)yi * 64;
 	const int re = t->re ? 1 : 0;
 
+	/* View clip is tile-level only (STATUS-pan-opt): a tile outside the pan
+	 * band skips the heavy path (coefs stay; paint brings them back). Do not
+	 * further clip stream rects to the view — that left edge tiles half-drawn
+	 * with painted set, so pan/paint skipped the rest (stale pixels). */
 	if (!tile_in_clip(c, xi, yi))
 	{
 		c->st->view_skip++;
-		return;
+		return; /* painted stays 0 */
 	}
-	/* the stream's rectangles, clipped to the tile, the view and the surface */
+	/* Stream rectangles clipped to the tile and the surface only. */
 	for (r = 0; r < c->nrects; r++)
 	{
 		const uint8_t* q = c->rects + r * 8;
@@ -507,13 +513,6 @@ static void render(struct ctx* c, struct rdp_prog_tile* t, uint16_t xi, uint16_t
 		if (y0 < ty) y0 = ty;
 		if (x1 > tx + 64) x1 = tx + 64;
 		if (y1 > ty + 64) y1 = ty + 64;
-		if (c->have_clip)
-		{
-			if (x0 < c->cx0) x0 = c->cx0;
-			if (y0 < c->cy0) y0 = c->cy0;
-			if (x1 > c->cx1) x1 = c->cx1;
-			if (y1 > c->cy1) y1 = c->cy1;
-		}
 		if (x1 > c->w) x1 = c->w;
 		if (y1 > c->h) y1 = c->h;
 		if (x0 >= x1 || y0 >= y1)
@@ -521,8 +520,8 @@ static void render(struct ctx* c, struct rdp_prog_tile* t, uint16_t xi, uint16_t
 		o[0] = (uint16_t)x0; o[1] = (uint16_t)y0; o[2] = (uint16_t)x1; o[3] = (uint16_t)y1;
 		n++;
 	}
-	/* Nothing of the tile to paint (every stream rect clipped away): skip
-	 * the dequant / DWT / YCbCr (coefs stay) and don't ask the accel. */
+	/* Nothing of the tile to paint (stream rects miss this tile): skip the
+	 * dequant / DWT / YCbCr (coefs stay) and don't ask the accel. */
 	if (n == 0)
 	{
 		c->st->empty_skip++;

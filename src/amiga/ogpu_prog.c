@@ -17,11 +17,14 @@
  * Cradle exercises this file's stream building and address maths against
  * the real core. Never set it on a user machine (Submit overhead, no gain).
  *
- * Fallback after install: a Submit/Wait that fails (anything but
- * OGPU_ERR_DATA) returns 0 and progressive.c does that step on the CPU
- * itself. OGPU_ERR_DATA from RLGR_DEC is a malformed tile
- * (RDP_PROG_E_PROTO), as the CPU decoder would say. All rectangles clipped
- * away: progressive.c skips the tile (stats.empty_skip), no Submit.
+ * Fallback after install: a Submit/Wait that fails, including
+ * OGPU_ERR_DATA from RLGR_DEC, returns 0 and progressive.c does that step
+ * on the CPU itself (stats.cpu_fallback). The in-tree CPU decoder is the
+ * authority on whether the stream is valid: a future ONGPU driver that
+ * answers ERR_DATA for a short RLGR stream (zeros past the end; the 0.27
+ * core never does for <= 4096 coefs) must not abort the session when the
+ * CPU path would accept it. All rectangles clipped away: progressive.c
+ * skips the tile (stats.empty_skip), no Submit.
  *
  * The buffers are progressive.c's own (68k memory, big-endian as stream.h
  * asks for v1.10). Tile state and the PDUs stay in progressive.c.
@@ -83,7 +86,10 @@ static int rlgr1(void* user, const uint8_t* const src[3], const uint16_t len[3],
 	r = run(w);
 	if (r == OGPU_OK)
 		return 1;
-	return r == OGPU_ERR_DATA ? RDP_PROG_E_PROTO : 0;
+	/* OGPU_ERR_DATA and every other failure: not taken. progressive.c
+	 * decodes on the CPU; only that path may answer RDP_PROG_E_PROTO. */
+	(void)r;
+	return 0;
 }
 
 static ULONG* ycbcr(ULONG* w, const int32_t* ycc, uint32_t* px, uint16_t sw, int tx, int ty, const uint16_t* q)
@@ -137,12 +143,26 @@ static int query_ongpu(ULONG op)
 }
 
 /* Lab / debug only: "1" in GFAmigaRDP/OGPUProgForce takes the Submit path on
- * the library's CPU core too (no ONGPU), to exercise this file on a Cradle. */
+ * the library's CPU core too (no ONGPU), to exercise this file on a Cradle.
+ * Trailing whitespace / newline from `echo 1 > ENV:...` is accepted. */
 static int lab_force(void)
 {
-	char v[4];
+	char v[8];
 	int n = amipr_getenv("GFAmigaRDP/OGPUProgForce", v, sizeof v);
-	return n == 1 && v[0] == '1';
+	int i = 0, j;
+	if (n < 0)
+		return 0;
+	if (n >= (int)sizeof v)
+		n = (int)sizeof v - 1;
+	v[n] = 0;
+	while (i < n && (v[i] == ' ' || v[i] == '\t' || v[i] == '\r' || v[i] == '\n'))
+		i++;
+	if (i >= n || v[i] != '1')
+		return 0;
+	j = i + 1;
+	while (j < n && (v[j] == ' ' || v[j] == '\t' || v[j] == '\r' || v[j] == '\n'))
+		j++;
+	return j >= n;
 }
 
 void rdp_ogpu_prog_install(void)

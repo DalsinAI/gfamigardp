@@ -6,13 +6,16 @@
  * whose buffers are big-endian, as on the Amiga.
  *
  * The stand-in matches ogpu_prog.c's control flow: TILE_RECTS=32 batches,
- * surface-stride YCBCR writes, OGPU_ERR_DATA from the core's RLGR_DEC maps to
- * RDP_PROG_E_PROTO, and a failed follow-on batch returns 0 so progressive.c
- * redraws the whole tile on the CPU (cpu_fallback). Failures come from the
- * real core (unmapped RLGR_DEC / YCBCR destinations: OGPU_ERR_NOMAP), never
- * a short-cut return; truncated RLGR goes through the core too (it answers
- * OK: zeros past the end, see test_rlgr_truncated). A tile whose rects
- * are all clipped away never reaches the hook (stats.empty_skip).
+ * surface-stride YCBCR writes, OGPU_ERR_DATA from RLGR_DEC returns 0 so
+ * progressive.c falls back to the CPU (the in-tree decoder is the authority;
+ * a future ONGPU driver that answers ERR_DATA must not PROTO-abort), and a
+ * failed follow-on batch returns 0 so progressive.c redraws the whole tile
+ * on the CPU (cpu_fallback). Failures come from the real core (unmapped
+ * RLGR_DEC / YCBCR destinations: OGPU_ERR_NOMAP) or an injected fake
+ * ERR_DATA (test_rlgr_err_data_fallback); truncated RLGR goes through the
+ * core too (it answers OK: zeros past the end, see test_rlgr_truncated). A
+ * tile whose rects are all clipped away never reaches the hook
+ * (stats.empty_skip).
  *   cc -std=c99 -Isrc/codec -I$GFOPENRTG/include -I$GFOPENRTG/library/opengpu \
  *      tests/host/test_prog_ogpu.c src/codec/progressive.c src/codec/gfx_fb.c \
  *      $GFOPENRTG/library/opengpu/ogpu_core.c $GFOPENRTG/library/opengpu/ogpu_dwt.c \
@@ -56,6 +59,9 @@ static int core_run(unsigned char* s, long words)
 	struct ogpu_core C;
 	ogpu_core_init(&C);
 	C.map = map;
+	C.fence = 0;   /* ogpu_core_init leaves callbacks alone; no stray FENCE fire */
+	C.ext = 0;
+	C.user = 0;
 	ogpu_core_run(&C, s, words);
 	return C.last_error;
 }
@@ -63,6 +69,7 @@ static int core_run(unsigned char* s, long words)
 static int calls_rlgr, calls_tile;
 static int last_rlgr_core;           /* the core's answer to the last RLGR_DEC batch */
 static int inject_tile_fail_after;   /* Nth tile Submit (1-based) gets an unmapped YCBCR; 0 = off */
+static int inject_rlgr_err_data;     /* pretend a driver answered OGPU_ERR_DATA */
 static int tile_submits;
 static int tile_core_fails;          /* tile batches the core failed */
 static long garbage_px;              /* poisoned canvas pixels copied to the surface */
@@ -75,6 +82,12 @@ static int shim_rlgr(void* user, const uint8_t* const src[3], const uint16_t len
 	int c, i, r;
 	(void)user;
 	calls_rlgr++;
+	if (inject_rlgr_err_data)
+	{
+		/* Fake ONGPU driver: ERR_DATA. ogpu_prog.c returns 0 (CPU fallback). */
+		last_rlgr_core = OGPU_ERR_DATA;
+		return 0;
+	}
 	ogpu_batch_init(&B, sb, sizeof sb / 4);
 	for (c = 0; c < 3; c++)
 	{
@@ -89,10 +102,8 @@ static int shim_rlgr(void* user, const uint8_t* const src[3], const uint16_t len
 	}
 	r = core_run(sb, B.words);
 	last_rlgr_core = r;
-	if (r == OGPU_ERR_DATA)
-		return RDP_PROG_E_PROTO;   /* ogpu_prog.c: r == OGPU_ERR_DATA -> RDP_PROG_E_PROTO */
 	if (r != OGPU_OK)
-		return 0;
+		return 0;   /* ogpu_prog.c: ERR_DATA and every other failure -> CPU */
 	for (i = 0; i < 3 * 4096; i++)
 		out[i] = (int16_t)(uint16_t)((arena[VAL_A + i * 2] << 8) | arena[VAL_A + i * 2 + 1]);
 	return 1;
@@ -449,11 +460,11 @@ static void test_rlgr_truncated(void)
 	printf("  truncated RLGR (62 bits past the end) -> core OGPU_OK, pixel-exact with the CPU: ok\n");
 }
 
-/* A real core error from RLGR_DEC other than OGPU_ERR_DATA (here
- * OGPU_ERR_NOMAP: the output address is outside the arena) returns 0 from
- * the hook; progressive.c decodes on the CPU and the pixels match. The
- * hook's OGPU_ERR_DATA -> RDP_PROG_E_PROTO branch is kept for drivers, but
- * the core can't answer ERR_DATA for 4096 coefficients (see above). */
+/* A real core error from RLGR_DEC (here OGPU_ERR_NOMAP: the output address
+ * is outside the arena) returns 0 from the hook; progressive.c decodes on
+ * the CPU and the pixels match. OGPU_ERR_DATA is the same shape (see
+ * test_rlgr_err_data_fallback); the 0.27 core can't answer it for 4096
+ * coefficients (see above). */
 static int rlgr_nomap;
 static int shim_rlgr_nomap(void* user, const uint8_t* const src[3], const uint16_t len[3], int re, int16_t* out)
 {
@@ -475,7 +486,7 @@ static int shim_rlgr_nomap(void* user, const uint8_t* const src[3], const uint16
 	if (r == OGPU_OK)
 		return 1;
 	rlgr_nomap += r == OGPU_ERR_NOMAP;
-	return r == OGPU_ERR_DATA ? RDP_PROG_E_PROTO : 0;   /* as ogpu_prog.c rlgr1() */
+	return 0;   /* as ogpu_prog.c rlgr1(): any failure -> CPU fallback */
 }
 
 static void test_rlgr_core_error(void)
@@ -674,6 +685,98 @@ static void test_clipped_skip(void)
 	printf("  all-rects-clipped -> empty_skip, no hook, no Submit: ok\n");
 }
 
+
+/* Fake ONGPU driver answers OGPU_ERR_DATA for RLGR_DEC: the hook returns 0
+ * (not RDP_PROG_E_PROTO), progressive.c decodes on the CPU, pixels match a
+ * CPU-only decode, and the session does not abort. */
+static void test_rlgr_err_data_fallback(void)
+{
+	static uint8_t frame[200000];
+	static uint32_t px[2][64 * 64];
+	int tx[1] = { 0 }, ty[1] = { 0 }, rc[2], i, diff = 0;
+	struct rdp_prog_stats st[2];
+	struct rdp_prog_accel acc;
+	size_t len;
+	memset(&acc, 0, sizeof(acc));
+	acc.rlgr = shim_rlgr;
+	acc.tile = shim_tile;
+	rng = 42;
+	len = make_region(frame, 0, 0, 1, 1, 1, tx, ty, 0);
+	inject_rlgr_err_data = 0;
+	rc[0] = run_simple(frame, len, NULL, px[0], &st[0]);
+	inject_rlgr_err_data = 1;
+	last_rlgr_core = -999;
+	rc[1] = run_simple(frame, len, &acc, px[1], &st[1]);
+	inject_rlgr_err_data = 0;
+	for (i = 0; i < 64 * 64; i++)
+		diff += px[0][i] != px[1][i];
+	CHECK(rc[0] == 0 && rc[1] == 0, "ERR_DATA fallback: rc %d / %d (must not PROTO)", rc[0], rc[1]);
+	CHECK(last_rlgr_core == OGPU_ERR_DATA, "ERR_DATA fallback: core %d", last_rlgr_core);
+	CHECK(st[1].accel_rlgr == 0 && st[1].cpu_fallback == 1 && st[1].accel_tiles == 1,
+	      "ERR_DATA fallback: accel_rlgr %u fallback %u accel_tiles %u",
+	      (unsigned)st[1].accel_rlgr, (unsigned)st[1].cpu_fallback, (unsigned)st[1].accel_tiles);
+	CHECK(diff == 0, "ERR_DATA fallback: %d pixels differ", diff);
+	printf("  RLGR_DEC fake ERR_DATA -> CPU fallback, pixel-exact, no PROTO: ok\n");
+}
+
+/* Non-tile-aligned view clip then paint the whole surface must equal a
+ * no-clip decode (bug: render() used to mark tiles painted after a partial
+ * clip, so paint skipped the rest — 9125 px stale outside the clip). */
+static void test_pan_paint_after_clip(void)
+{
+	static uint8_t frame[400000];
+	enum { GW = 3, GH = 2, W = GW * 64 - 17, H = GH * 64 - 9 };
+	struct rdp_prog_clip clip = { 20, 10, 150, 100 };
+	int seed, bad = 0, tot = 0, worst_diff = 0;
+	for (seed = 0; seed < 40; seed++)
+	{
+		struct rdp_prog_surface ps[2];
+		uint32_t* px[2];
+		int pass, f, i, tx[6], ty[6], diff = 0;
+		rng = (uint32_t)(seed * 7919 + 1);
+		for (pass = 0; pass < 2; pass++)
+		{
+			memset(&ps[pass], 0, sizeof(ps[pass]));
+			px[pass] = calloc((size_t)W * H, 4);
+		}
+		for (f = 0; f < 6; f++)
+		{
+			int kind = f == 0 ? 0 : f < 3 ? 1 : 2, n = 0;
+			size_t len;
+			for (i = 0; i < GW * GH; i++)
+				if (rnd() % 3 || kind != 0)
+				{
+					tx[n] = i % GW;
+					ty[n] = i / GW;
+					n++;
+				}
+			len = make_region(frame, seed & 1, kind, GW, GH, n, tx, ty, 0);
+			/* pass 0: no clip; pass 1: view clip (partial tiles) */
+			rdp_progressive_decode(&ps[0], NULL, frame, len, px[0], W, H, NULL, NULL, NULL, NULL);
+			rdp_progressive_decode(&ps[1], NULL, frame, len, px[1], W, H, NULL, NULL, NULL, &clip);
+		}
+		rdp_progressive_paint(&ps[1], NULL, px[1], W, H, 0, 0, W, H, NULL, NULL, NULL);
+		for (i = 0; i < W * H; i++)
+			diff += px[0][i] != px[1][i];
+		tot++;
+		if (diff)
+		{
+			bad++;
+			if (diff > worst_diff)
+				worst_diff = diff;
+			if (bad <= 3)
+				CHECK(0, "pan-paint seed %d: %d px differ (clip-decode+paint vs no-clip)", seed, diff);
+		}
+		for (pass = 0; pass < 2; pass++)
+		{
+			rdp_progressive_free(&ps[pass], NULL);
+			free(px[pass]);
+		}
+	}
+	CHECK(bad == 0, "pan-paint: %d/%d seeds differ (worst %d px)", bad, tot, worst_diff);
+	printf("  view-clip then pan-paint vs no-clip: %d/%d seeds pixel-exact\n", tot - bad, tot);
+}
+
 int main(int argc, char** argv)
 {
 	int seeds = argc > 1 ? atoi(argv[1]) : 40, s, tiles = 0;
@@ -688,8 +791,11 @@ int main(int argc, char** argv)
 	printf("failure / batch paths:\n");
 	test_rlgr_truncated();
 	test_rlgr_core_error();
+	test_rlgr_err_data_fallback();
 	test_tile_batch_fail();
 	test_many_rects();
 	test_clipped_skip();
+	printf("pan / paint:\n");
+	test_pan_paint_after_clip();
 	return fails != 0;
 }

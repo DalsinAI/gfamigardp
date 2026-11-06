@@ -396,7 +396,12 @@ static void toggle_fullscreen(struct sw* s)
 		w = s->conn->demand.width;
 		h = s->conn->demand.height;
 	}
-	depth = s->pub->RastPort.BitMap ? s->pub->RastPort.BitMap->Depth : 8;
+	/* the real depth: an RTG bitmap's Depth field says 8 whatever it holds
+	 * (GFOpenRTG and Picasso96 alike), and 8 asked a CLUT8 mode for a
+	 * true-colour Workbench, where the dither's pens were the Workbench's:
+	 * the full screen came up mostly black */
+	depth = s->pub->RastPort.BitMap ? GetBitMapAttr(s->pub->RastPort.BitMap, BMA_DEPTH) : 8;
+	if (!depth) depth = 8;
 	snprintf(title, sizeof(title), APP_NAME " \xB7 %s%s", s->info->host, s->info->demo ? " (demo)" : "");
 
 	if (menu && s->win)
@@ -411,10 +416,17 @@ static void toggle_fullscreen(struct sw* s)
 
 	if (!s->fullscreen)
 	{
-		mode = BestModeID(BIDTAG_NominalWidth, w,
+		/* a mode of the Workbench's kind (its board, its pixel format) first */
+		mode = BestModeID(BIDTAG_SourceID, GetVPModeID(&s->pub->ViewPort),
+		                  BIDTAG_NominalWidth, w,
 		                  BIDTAG_NominalHeight, h,
 		                  BIDTAG_Depth, depth,
 		                  TAG_END);
+		if (mode == INVALID_ID)
+			mode = BestModeID(BIDTAG_NominalWidth, w,
+			                  BIDTAG_NominalHeight, h,
+			                  BIDTAG_Depth, depth,
+			                  TAG_END);
 		s->own = OpenScreenTags(NULL,
 			SA_Type, CUSTOMSCREEN,
 			SA_DisplayID, mode,
@@ -423,6 +435,7 @@ static void toggle_fullscreen(struct sw* s)
 			SA_Depth, depth,
 			SA_ShowTitle, FALSE,
 			SA_Quiet, TRUE,
+			SA_SharePens, TRUE,   /* a palette screen: the dither cube can have pens */
 			SA_Title, (ULONG)APP_NAME,
 			TAG_END);
 		if (!s->own)
@@ -447,6 +460,7 @@ static void toggle_fullscreen(struct sw* s)
 		target = s->own;
 		if (!open_session_window(s, target, title, (int)w, (int)h))
 		{
+			desktop_release_pens();
 			CloseScreen(s->own);
 			s->own = NULL;
 			s->fullscreen = 0;
@@ -466,6 +480,7 @@ static void toggle_fullscreen(struct sw* s)
 	{
 		if (s->own)
 		{
+			desktop_release_pens();
 			CloseScreen(s->own);
 			s->own = NULL;
 		}
@@ -926,6 +941,7 @@ int session_window(struct app* app, struct session_info* info)
 		CloseWindow(s.win);
 	if (s.own)
 	{
+		desktop_release_pens();
 		CloseScreen(s.own);
 		s.own = NULL;
 	}

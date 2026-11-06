@@ -78,6 +78,7 @@ int session_window(struct app* app, struct session_info* info);
 /* desktop.c: the desktop area: a test pattern until the RDP output draws there */
 void desktop_draw(struct Window* win, int x, int y, int w, int h, const struct session_info* info);
 void desktop_free(void);
+void desktop_release_pens(void);
 /* the remote desktop from the Graphics Output Buffer (gfx_fb.h): only
  * rects (fb coordinates), or all of it; clipped to the w x h band */
 struct rdp_fb;

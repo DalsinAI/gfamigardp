@@ -141,6 +141,9 @@ static int on_gfx_create(struct rdp_dynvc* d, uint32_t id, const char* name, voi
 	return 0;
 }
 
+/* Lab capture (RDPProbe CAPTURE=file): every RDPGFX message as it arrives, for host replay. */
+void (*rdp_gfx_tap)(const uint8_t* data, size_t len) = NULL;
+
 static void on_gfx_data(struct rdp_dynvc* d, uint32_t id, const uint8_t* data, size_t len, void* user)
 {
 	struct rdp_conn* c = (struct rdp_conn*)user;
@@ -150,7 +153,11 @@ static void on_gfx_data(struct rdp_dynvc* d, uint32_t id, const uint8_t* data, s
 	c->gfx_msgs++;
 	c->gfx_bytes += (uint32_t)len;
 	if (c->gfx && id == c->gfx_chan)
+	{
+		if (rdp_gfx_tap)
+			rdp_gfx_tap(data, len);
 		rdp_gfx_input(c->gfx, data, len);   /* errors are counted in gfx->st */
+	}
 }
 
 static void on_gfx_close(struct rdp_dynvc* d, uint32_t id, void* user)

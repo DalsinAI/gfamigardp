@@ -142,6 +142,77 @@ static int test_trim(void)
 	return 0;
 }
 
+static uint8_t* put16(uint8_t* p, unsigned v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); return p + 2; }
+static uint8_t* put32(uint8_t* p, uint32_t v) { p = put16(p, v & 0xFFFF); return put16(p, v >> 16); }
+
+/* One region of one simple tile at (xi, yi), a whole-tile rect, three empty
+ * components (RLGR reads zeros) and the tile flags given (test_prog_ogpu.c's
+ * make_simple_tile with a place and flags). */
+static size_t simple_tile(uint8_t* buf, int xi, int yi, int flags)
+{
+	uint8_t *p = buf, *len_at, *tsize_at, *tiles, *t;
+	int i, c;
+	p = put16(p, 0xCCC4);
+	len_at = p; p += 4;
+	*p++ = 64;
+	p = put16(p, 1);
+	*p++ = 1; *p++ = 1; *p++ = 0;
+	p = put16(p, 1);
+	tsize_at = p; p += 4;
+	p = put16(p, (unsigned)(xi * 64)); p = put16(p, (unsigned)(yi * 64)); p = put16(p, 64); p = put16(p, 64);
+	for (i = 0; i < 5; i++)
+		*p++ = 0x66;
+	*p++ = 0;
+	for (i = 0; i < 15; i++)
+		*p++ = 0;
+	tiles = p;
+	t = p;
+	p = put16(p, 0xCCC5);
+	p += 4;
+	*p++ = 0; *p++ = 0; *p++ = 0;
+	p = put16(p, (unsigned)xi); p = put16(p, (unsigned)yi);
+	*p++ = (uint8_t)flags;
+	for (c = 0; c < 3; c++)
+		p = put16(p, 0);
+	p = put16(p, 0);
+	put32(t + 2, (uint32_t)(p - t));
+	put32(tsize_at, (uint32_t)(p - tiles));
+	put32(len_at, (uint32_t)(p - buf));
+	return (size_t)(p - buf);
+}
+
+/* A tile trim emptied, sent again: it gets new coefs (it used to come back
+ * with coef NULL, and first_pass wrote 24 KB from address 0: on the Amiga,
+ * the vectors; a freeze in the next interrupt, 6 Nov 2026). A difference
+ * tile on it is skipped and leaves it trimmed. */
+static int test_trimmed_tile_again(void)
+{
+	struct rdp_prog_surface ps;
+	struct rdp_prog_stats st;
+	struct rdp_prog_clip clip = { 0, 0, 64, 64 };
+	uint8_t buf[256];
+	uint32_t* px = calloc(256 * 256, sizeof(uint32_t));
+	struct rdp_prog_tile* t;
+	size_t n;
+	memset(&ps, 0, sizeof(ps));
+	memset(&st, 0, sizeof(st));
+	CHECK(px);
+	n = simple_tile(buf, 0, 0, 0);
+	CHECK(rdp_progressive_decode(&ps, NULL, buf, n, px, 256, 256, NULL, NULL, &st, &clip) >= 0);
+	CHECK(ps.tiles && (t = ps.tiles[0]) && t->coef);
+	CHECK(rdp_progressive_trim(&ps, NULL, 128, 128, 256, 256, &st) == 1);
+	CHECK(ps.tiles[0]->coef == NULL);
+	n = simple_tile(buf, 0, 0, 1);   /* RFX_TILE_DIFFERENCE */
+	CHECK(rdp_progressive_decode(&ps, NULL, buf, n, px, 256, 256, NULL, NULL, &st, &clip) >= 0);
+	CHECK(ps.tiles[0]->coef == NULL);
+	n = simple_tile(buf, 0, 0, 0);
+	CHECK(rdp_progressive_decode(&ps, NULL, buf, n, px, 256, 256, NULL, NULL, &st, &clip) >= 0);
+	CHECK(ps.tiles[0]->coef != NULL);
+	rdp_progressive_free(&ps, NULL);
+	free(px);
+	return 0;
+}
+
 static void bench_idwt(int re, int rounds)
 {
 	static int32_t buf[4096], tmp[20000];
@@ -180,6 +251,7 @@ int main(void)
 	CHECK(test_dwt(0) <= 8);
 	test_view_paint();
 	test_trim();
+	test_trimmed_tile_again();
 	if (!fails) {
 		bench_idwt(1, 500);
 		bench_idwt(0, 500);

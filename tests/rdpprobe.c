@@ -49,8 +49,8 @@ static const char version[] = "$VER: RDPProbe 0.2 (04.11.2026) AmiCradle Team";
  * libnix's startup swaps to this much (review H2) */
 unsigned long __stack = 65536;
 
-#define TEMPLATE "HOST/A,PORT/N,USER/K,DOMAIN/K,PASSWORD/K,RDP/S,TLS/S,NLA/S,DUMP/K,ASKPASS/S,ACTIVATE/S,WAIT/N,CHANNELS/K,EARLY/K,DEPTHS/K,BPP/N,TRUST/S,GFXCAPS/K"
-enum { A_HOST, A_PORT, A_USER, A_DOMAIN, A_PASSWORD, A_RDP, A_TLS, A_NLA, A_DUMP, A_ASKPASS, A_ACTIVATE, A_WAIT, A_CHANNELS, A_EARLY, A_DEPTHS, A_BPP, A_TRUST, A_GFXCAPS, A_N };
+#define TEMPLATE "HOST/A,PORT/N,USER/K,DOMAIN/K,PASSWORD/K,RDP/S,TLS/S,NLA/S,DUMP/K,ASKPASS/S,ACTIVATE/S,WAIT/N,CHANNELS/K,EARLY/K,DEPTHS/K,BPP/N,TRUST/S,GFXCAPS/K,CAPTURE/K"
+enum { A_HOST, A_PORT, A_USER, A_DOMAIN, A_PASSWORD, A_RDP, A_TLS, A_NLA, A_DUMP, A_ASKPASS, A_ACTIVATE, A_WAIT, A_CHANNELS, A_EARLY, A_DEPTHS, A_BPP, A_TRUST, A_GFXCAPS, A_CAPTURE, A_N };
 
 static char pw[512];
 static char user_utf8[256];
@@ -330,6 +330,15 @@ static void print_nla(int rc, const struct rdp_nla_result* r)
 		printf("NLA failed after %s: %s\n", stage_name(r->stage), rdp_error_text(rc));
 }
 
+extern void (*rdp_gfx_tap)(const uint8_t* data, size_t len);
+static BPTR cap_fh;
+static void cap_write(const uint8_t* data, size_t len)
+{
+	uint8_t h[4];
+	h[0] = (uint8_t)(len >> 24); h[1] = (uint8_t)(len >> 16); h[2] = (uint8_t)(len >> 8); h[3] = (uint8_t)len;
+	if (cap_fh) { Write(cap_fh, h, 4); Write(cap_fh, (APTR)data, (LONG)len); }
+}
+
 int main(void)
 {
 	LONG args[A_N] = { 0 };
@@ -342,6 +351,8 @@ int main(void)
 
 	(void)version;
 	rd = ReadArgs((CONST_STRPTR)TEMPLATE, args, NULL);
+	if (rd && args[A_CAPTURE] && (cap_fh = Open((CONST_STRPTR)args[A_CAPTURE], MODE_NEWFILE)))
+		rdp_gfx_tap = cap_write;
 	if (!rd)
 	{
 		PrintFault(IoErr(), (CONST_STRPTR) "RDPProbe");
@@ -553,5 +564,6 @@ again:
 	rdp_transport_close(t);
 	amipr_net_close();
 	FreeArgs(rd);
+	if (cap_fh) Close(cap_fh);
 	return rc ? RETURN_WARN : RETURN_OK;
 }

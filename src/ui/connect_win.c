@@ -647,7 +647,7 @@ int connect_window(struct app* app, const char* host, struct session_info* info)
 		WA_Left, (app->screen->Width - w) / 2, WA_Top, (app->screen->Height - h) / 2,
 		WA_Width, w, WA_Height, h, WA_MinWidth, 420, WA_MinHeight, 240,
 		WA_MaxWidth, ~0UL, WA_MaxHeight, ~0UL,
-		WA_DragBar, TRUE, WA_DepthGadget, TRUE, WA_CloseGadget, TRUE, WA_SizeGadget, TRUE,
+		WA_DragBar, TRUE, WA_DepthGadget, TRUE, WA_CloseGadget, TRUE, WA_SizeGadget, TRUE, WA_SizeBBottom, TRUE,
 		WA_Activate, TRUE, WA_SimpleRefresh, TRUE, WA_ReportMouse, TRUE, WA_NewLookMenus, TRUE,
 		WA_IDCMP, olui_amiga_idcmp() | IDCMP_MENUPICK, TAG_DONE);
 	if (!c.win)

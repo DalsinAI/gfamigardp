@@ -88,7 +88,10 @@ void rdp_progressive_free(struct rdp_prog_surface* ps, const struct rdp_mem* mem
  *
  * rlgr: the RLGR1 of the three components (src[c], len[c] bytes) into
  *   out + c * 4096, with LL3's deltas summed (re: the band layout). 1 done,
- *   0 not taken (the CPU decodes), RDP_PROG_E_PROTO for a malformed stream.
+ *   0 not taken (the CPU decodes — also for OGPU_ERR_DATA from a driver;
+ *   the in-tree decoder is the authority on stream validity). A negative
+ *   value is RDP_PROG_E_PROTO (session abort); hooks should not use it for
+ *   a soft accel failure.
  * tile: dequantize coef (3 x 4096) with quant[c][band], inverse DWT into ycc
  *   (3 x 4096, Y Cb Cr; tmp: RDP_PROG_TMP ints of scratch) and write the
  *   nrects rectangles (x0, y0, x1, y1 exclusive, surface coordinates, already

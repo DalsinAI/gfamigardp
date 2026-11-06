@@ -120,3 +120,10 @@ Bugfix (post-merge, 2026-11-05)
   seeds × 9125 px stale outside the clip).
 - Nits: test core_run clears C.fence; OGPUProgForce trims whitespace.
 - Host: tools/test_prog_ogpu.sh 40 + ERR_DATA fallback + pan-paint regression.
+
+Stove (bugfix tips)
+- gfopenrtg library/opengpu @ 97b82ad: j20261106T000717-4663b8 green
+  gfopengpu.library 260620 B sha256 f17fd9b0eb926c60e5b1fdc69d3307f144dce206df890690ed25eba744f4050e
+- gfamigardp @ 595819c: j20261106T001238-77cca8 green
+  GFAmigaRDP 434568 B sha256 6c5d988634b0ee439408ec313cd4dd4ead0ca8e9111f7d6c30fb1824b326bef4
+  (fetched gfopensdk b1c8ed7)

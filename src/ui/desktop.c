@@ -101,8 +101,9 @@ static void get_pens(struct Screen* scr)
 {
 	static const ULONG lv[3] = { 0, 0x80000000UL, 0xFFFFFFFFUL };
 	int r, g, b;
-	if (s_cm)
+	if (s_cm == scr->ViewPort.ColorMap)
 		return;
+	desktop_release_pens();   /* the cube was another screen's (full screen and back) */
 	s_cm = scr->ViewPort.ColorMap;
 	for (r = 0; r < 3; r++)
 		for (g = 0; g < 3; g++)
@@ -116,7 +117,9 @@ static void get_pens(struct Screen* scr)
 	s_black = ObtainBestPen(s_cm, 0, 0, 0, TAG_DONE);
 }
 
-void desktop_free(void)
+/* Give back the cube's and the text's pens. Called before the screen they
+ * came from closes (the full screen's own), and by desktop_free. */
+void desktop_release_pens(void)
 {
 	int i;
 	if (s_cm)
@@ -129,6 +132,11 @@ void desktop_free(void)
 	s_cm = NULL;
 	s_npens = 0;
 	s_white = s_black = -1;
+}
+
+void desktop_free(void)
+{
+	desktop_release_pens();
 	if (CyberGfxBase)
 		CloseLibrary(CyberGfxBase);
 	CyberGfxBase = NULL;

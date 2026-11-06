@@ -91,8 +91,8 @@ Not yet
 - No live Windows / GNOME RD pixel capture through the new path yet.
 - No 68040 timings of Submit-vs-in-tree (gated off until ONGPU).
 
-Pins: gfopensdk b1c8ed7 (team6/stream-rlgr-errdata-doc, PR #49; gathers
-gfopenrtg 97b82ad stream.h RLGR_DEC ERR_DATA wording). Prior merge pin was
+Pins: gfopensdk 60797bf (main, squash of PR #49; gathers gfopenrtg main
+5b7bfc6 stream.h RLGR_DEC ERR_DATA wording). Prior merge pin was
 007965a / gfopenrtg 5af78d8.
 
 Amiga build (skeptic claim 1 / Amiga proof)
@@ -126,4 +126,4 @@ Stove (bugfix tips)
   gfopengpu.library 260620 B sha256 f17fd9b0eb926c60e5b1fdc69d3307f144dce206df890690ed25eba744f4050e
 - gfamigardp @ 595819c: j20261106T001238-77cca8 green
   GFAmigaRDP 434568 B sha256 6c5d988634b0ee439408ec313cd4dd4ead0ca8e9111f7d6c30fb1824b326bef4
-  (fetched gfopensdk b1c8ed7)
+  (fetched gfopensdk 60797bf)
